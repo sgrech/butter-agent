@@ -24,6 +24,7 @@ from pathlib import Path
 from butter_agent import __version__
 from butter_agent.app import build_repl, load_or_default_config, resolve_config_path
 from butter_agent.core.config import ConfigError
+from butter_agent.core.plugin_source import PluginLoadError
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -69,6 +70,11 @@ def _cmd_start(config_path: Path | None) -> int:
 
     try:
         asyncio.run(_run())
+    except PluginLoadError as exc:
+        # Declared in config but couldn't be resolved/imported. The user
+        # wrote the [[plugin]] entry, so this is their config to fix.
+        sys.stderr.write(f'[error] plugin: {exc}\n')
+        return 2
     except (OSError, sqlite3.Error) as exc:
         # First-run install paths can hit PermissionError on mkdir, ENOSPC on
         # the SQLite write, or a corrupted DB at `storage.path`. Surface those

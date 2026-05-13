@@ -95,3 +95,23 @@ class _RecordingOutput:
 
     def write(self, text: str) -> None:
         self._stream.write(text)
+
+
+async def test_build_repl_wraps_registry_errors_as_plugin_load_error(tmp_path: Path) -> None:
+    """RegistryBuilder rejections (duplicate names, blast-radius violations)
+    must surface as PluginLoadError so the CLI renders them through the
+    same friendly diagnostic path as missing manifests / bad imports.
+    """
+    from butter_agent.core.config import CoreConfig, PluginPath
+    from butter_agent.core.plugin_source import PluginLoader, PluginLoadError
+    from butter_agent.core.registry import BlastRadius
+
+    fixture = Path(__file__).resolve().parent / 'fixtures' / 'fake_plugin'
+    config = Config(
+        core=CoreConfig(max_blast_radius=BlastRadius.READ_ONLY),
+        storage=StorageConfig(path=str(tmp_path / 'butter.db')),
+        # Two declarations of the same plugin → DuplicatePluginError → wrapped.
+        plugins=(PluginPath(path=str(fixture)), PluginPath(path=str(fixture))),
+    )
+    with pytest.raises(PluginLoadError, match='registry rejected'):
+        await build_repl(config, plugin_loader=PluginLoader())

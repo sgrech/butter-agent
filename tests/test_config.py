@@ -26,6 +26,7 @@ from butter_agent.core.config import (
     ConfigError,
     CoreConfig,
     ModelConfig,
+    PluginPath,
     PluginSource,
     StorageConfig,
     load_config,
@@ -205,7 +206,8 @@ def test_multiple_plugins_preserve_order() -> None:
         source = "github.com/b/two@v2"
         """,
     )
-    assert [p.repo for p in cfg.plugins] == ['github.com/a/one', 'github.com/b/two']
+    repos = [p.repo for p in cfg.plugins if isinstance(p, PluginSource)]
+    assert repos == ['github.com/a/one', 'github.com/b/two']
 
 
 def test_plugin_missing_at_rejected() -> None:
@@ -229,14 +231,32 @@ def test_plugin_branch_refs_rejected(ref: str) -> None:
         load_config(f'[[plugin]]\nsource = "github.com/example/notes@{ref}"')
 
 
-def test_plugin_missing_source_key() -> None:
-    with pytest.raises(ConfigError, match='missing or empty string `source`'):
+def test_plugin_missing_source_and_path() -> None:
+    with pytest.raises(ConfigError, match=r'missing `source` .* or `path`'):
         load_config('[[plugin]]\nname = "notes"')
 
 
+def test_plugin_with_both_source_and_path_rejected() -> None:
+    with pytest.raises(ConfigError, match='not both'):
+        load_config('[[plugin]]\nsource = "github.com/x/y@v1"\npath = "/tmp/x"')
+
+
 def test_plugin_non_string_source() -> None:
-    with pytest.raises(ConfigError, match='missing or empty string `source`'):
+    with pytest.raises(ConfigError, match='`source` must be a non-empty string'):
         load_config('[[plugin]]\nsource = 42')
+
+
+def test_plugin_path_must_be_string() -> None:
+    with pytest.raises(ConfigError, match='`path` must be a non-empty string'):
+        load_config('[[plugin]]\npath = 7')
+
+
+def test_plugin_path_accepted() -> None:
+    cfg = load_config('[[plugin]]\npath = "/abs/dev/plugin"')
+    assert len(cfg.plugins) == 1
+    entry = cfg.plugins[0]
+    assert isinstance(entry, PluginPath)
+    assert entry.path == '/abs/dev/plugin'
 
 
 def test_plugin_entries_must_be_array() -> None:
@@ -263,4 +283,6 @@ def test_section_must_be_table() -> None:
 
 def test_plugin_ref_case_preserved() -> None:
     cfg = load_config('[[plugin]]\nsource = "github.com/example/notes@V1.0.0"')
-    assert cfg.plugins[0].ref == 'V1.0.0'
+    entry = cfg.plugins[0]
+    assert isinstance(entry, PluginSource)
+    assert entry.ref == 'V1.0.0'
