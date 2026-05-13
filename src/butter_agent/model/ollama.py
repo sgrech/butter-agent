@@ -40,6 +40,7 @@ from butter_agent.core.context_manager import (
     MemorySnippet,
 )
 from butter_agent.core.loop import (
+    ExecutionResult,
     ModelContext,
     ModelOutput,
     ModelProtocolError,
@@ -145,10 +146,15 @@ class OllamaModelClient:
         self._transport: Transport = transport if transport is not None else _UrllibTransport()
 
     async def generate(self, context: ModelContext) -> ModelOutput:
+        # Presence of an `execution` payload entry flips the adapter into
+        # synthesis mode: different system prompt (reply-only) and the
+        # rendered user prompt includes the tool results.
+        synthesis = context.payload.get('execution') is not None
+        system_prompt = _SYNTHESIS_SYSTEM_PROMPT if synthesis else _SYSTEM_PROMPT
         body: dict[str, object] = {
             'model': self._model,
             'messages': [
-                {'role': 'system', 'content': _SYSTEM_PROMPT},
+                {'role': 'system', 'content': system_prompt},
                 {'role': 'user', 'content': _render_user_prompt(context)},
             ],
             'format': 'json',
@@ -204,6 +210,22 @@ Return JSON only. No prose outside the object.
 """
 
 
+_SYNTHESIS_SYSTEM_PROMPT = """\
+You are butter-agent. The system has just executed a plugin task plan on
+the user's behalf in response to their request. The "Tool results"
+section in the user message contains the steps that ran and the outputs
+each step produced.
+
+Produce a JSON object: {"type": "reply", "text": "..."} where text is a
+short, natural-language answer to the user's original request, grounded
+in the tool results. Quote concrete values from the outputs where they
+help; convert units or timezones if the user asked for that.
+
+Do not return "type": "plan". Do not propose new plugin actions. The
+plan has already run. Return JSON only. No prose outside the object.
+"""
+
+
 def _render_user_prompt(context: ModelContext) -> str:
     """Render the user-facing prompt from the assembled `ModelContext`.
 
@@ -214,19 +236,21 @@ def _render_user_prompt(context: ModelContext) -> str:
     """
     payload = context.payload
     parts: list[str] = []
+    execution = payload.get('execution')
 
-    # Capabilities are always rendered — even when empty — so the model
-    # sees the absence rather than inferring it. A missing section let the
-    # model confabulate plausible plugins ("file system access", "web
-    # search") when asked what it could do; rendering "(none)" forces
-    # honesty.
-    capabilities = _expect_tuple(payload.get('capabilities', ()), CapabilityDescriptor, 'capabilities')
-    parts.append('Available capabilities:')
-    if capabilities:
-        parts.extend(f'- {c.plugin}.{c.capability}: {c.description}' for c in capabilities)
-    else:
-        parts.append('(none)')
-    parts.append('')
+    if execution is None:
+        # Intent-recognition pass. Capabilities are always rendered — even
+        # when empty — so the model sees the absence rather than inferring
+        # it. A missing section let the model confabulate plausible plugins
+        # ("file system access", "web search") when asked what it could do;
+        # rendering "(none)" forces honesty.
+        capabilities = _expect_tuple(payload.get('capabilities', ()), CapabilityDescriptor, 'capabilities')
+        parts.append('Available capabilities:')
+        if capabilities:
+            parts.extend(f'- {c.plugin}.{c.capability}: {c.description}' for c in capabilities)
+        else:
+            parts.append('(none)')
+        parts.append('')
 
     history = _expect_tuple(payload.get('history', ()), ConversationEntry, 'history')
     if history:
@@ -241,6 +265,21 @@ def _render_user_prompt(context: ModelContext) -> str:
     if memory:
         parts.append('Relevant memory:')
         parts.extend(f'- [{m.source}] {m.content}' for m in memory)
+        parts.append('')
+
+    if execution is not None:
+        if not isinstance(execution, ExecutionResult):
+            raise ModelProtocolError(
+                f"context payload 'execution' must be an ExecutionResult, got {type(execution).__name__}",
+            )
+        parts.append('Tool results:')
+        for step in execution.plan.steps:
+            alias = f' → ${step.outputs_as}' if step.outputs_as else ''
+            parts.append(f'- step {step.step}: {step.plugin}.{step.capability}{alias}')
+            if step.outputs_as is not None and step.outputs_as in execution.outputs:
+                fields = execution.outputs[step.outputs_as]
+                for key, value in fields.items():
+                    parts.append(f'    {key}: {value!r}')
         parts.append('')
 
     parts.append(f'User: {context.turn.user_input}')

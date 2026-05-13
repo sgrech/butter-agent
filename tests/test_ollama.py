@@ -28,9 +28,11 @@ from butter_agent.core.context_manager import (
     MemorySnippet,
 )
 from butter_agent.core.loop import (
+    ExecutionResult,
     ModelContext,
     ModelProtocolError,
     ModelReply,
+    PlanStep,
     TaskPlan,
     Turn,
 )
@@ -455,6 +457,58 @@ async def test_system_prompt_states_capability_list_is_exhaustive() -> None:
     assert 'complete and exhaustive' in folded
     assert 'no plugins installed' in folded
     assert 'you can only chat' in folded
+
+
+# --- Synthesis-mode prompting -----------------------------------------------
+
+
+def _execution_result(outputs: dict[str, dict[str, object]] | None = None) -> ExecutionResult:
+    plan = TaskPlan(
+        steps=(PlanStep(step=1, plugin='clock', capability='now', inputs={}, gate='none', outputs_as='t'),),
+    )
+    return ExecutionResult(plan=plan, outputs=outputs if outputs is not None else {'t': {'time': '17:00', 'tz': 'CEST'}})
+
+
+async def test_synthesis_uses_reply_only_system_prompt() -> None:
+    # Presence of `execution` in the payload swaps the system prompt to the
+    # synthesis variant, which forbids returning a plan.
+    client, transport = _client(_ollama_response({'type': 'reply', 'text': 'It is 17:00 CEST.'}))
+    await client.generate(_ctx('what time is it', execution=_execution_result()))
+    folded = _system_prompt(transport)
+    assert 'plugin task plan' in folded
+    assert 'plan has already run' in folded
+    assert 'Do not return "type": "plan"' in folded
+
+
+async def test_synthesis_renders_tool_results_section() -> None:
+    client, transport = _client(_ollama_response({'type': 'reply', 'text': 'ok'}))
+    await client.generate(_ctx('what time is it', execution=_execution_result()))
+    user_msg = _user_message(transport)
+    assert 'Tool results:' in user_msg
+    assert 'step 1: clock.now → $t' in user_msg
+    # Output fields are surfaced with their values so the model can quote them.
+    assert "time: '17:00'" in user_msg
+    assert "tz: 'CEST'" in user_msg
+
+
+async def test_synthesis_omits_capabilities_section() -> None:
+    # Capabilities are the menu for planning; in synthesis the plan already
+    # ran, so the menu is irrelevant and could nudge the model toward
+    # proposing follow-up actions instead of replying.
+    client, transport = _client(_ollama_response({'type': 'reply', 'text': 'ok'}))
+    await client.generate(_ctx('q', execution=_execution_result()))
+    user_msg = _user_message(transport)
+    assert 'Available capabilities:' not in user_msg
+
+
+async def test_synthesis_rejects_non_execution_value() -> None:
+    # Defense against a context manager that puts the wrong thing under
+    # the 'execution' key — surface a protocol error instead of letting
+    # the prompt render garbage.
+    client, _ = _client(_ollama_response({'type': 'reply', 'text': 'ok'}))
+    bad = _ctx('q', execution='not-an-execution')
+    with pytest.raises(ModelProtocolError, match="'execution'"):
+        await client.generate(bad)
 
 
 # --- Transport error wrapping (timeouts) ------------------------------------

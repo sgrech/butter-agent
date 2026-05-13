@@ -122,7 +122,7 @@ async def build_repl(
     )
     gate_handler = ReplGateHandler(io_in, io_out)
     executor = DefaultTaskExecutor(registry, gate_handler)
-    loop = AgentLoop(context_manager, model, executor)
+    loop = AgentLoop(context_manager, model, executor, history=history)
 
     commands = build_default_commands(
         config=config,
