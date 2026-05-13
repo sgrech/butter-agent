@@ -219,3 +219,5 @@ __marimo__/
 
 # Per-session Claude Code debrief artifact — local only, never committed.
 .claude/next-session.md
+local-config.toml
+butter-local.db*

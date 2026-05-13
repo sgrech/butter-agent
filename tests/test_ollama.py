@@ -357,14 +357,35 @@ async def test_prompt_surfaces_history_and_memory() -> None:
     assert '[memory-mcp]' in user_msg
 
 
-async def test_prompt_omits_empty_sections() -> None:
+async def test_prompt_omits_empty_history_and_memory_sections() -> None:
+    """History and memory headers are suppressed when empty.
+
+    Capabilities is the exception — see
+    `test_prompt_renders_empty_capabilities_explicitly` — because a missing
+    section let the model confabulate plausible plugins.
+    """
     client, transport = _client(_ollama_response({'type': 'reply', 'text': 'ok'}))
     await client.generate(_ctx('only input', capabilities=(), history=(), memory=()))
     user_msg = _user_message(transport)
-    assert 'Available capabilities' not in user_msg
     assert 'Recent conversation' not in user_msg
     assert 'Relevant memory' not in user_msg
     assert 'only input' in user_msg
+
+
+async def test_prompt_renders_empty_capabilities_explicitly() -> None:
+    """Empty registry must surface the `Available capabilities:` header
+    followed by `(none)` on the next line.
+
+    Discovered during user-test on 2026-05-13: with the header omitted,
+    the model invented capabilities ("file system access", "web search")
+    when asked what it could do, because it had no signal the absence was
+    intentional. Rendering `(none)` forces honesty.
+    """
+    client, transport = _client(_ollama_response({'type': 'reply', 'text': 'ok'}))
+    await client.generate(_ctx('what can you do?', capabilities=()))
+    user_msg = _user_message(transport)
+    assert 'Available capabilities:' in user_msg
+    assert '(none)' in user_msg
 
 
 async def test_payload_with_wrong_type_raises_protocol_error() -> None:
@@ -418,3 +439,19 @@ async def test_system_prompt_forbids_fabricating_plans_without_capability() -> N
     assert 'no matching capability' in folded
     assert 'do not invent' in folded
     assert 'fabricate a plan' in folded
+
+
+async def test_system_prompt_states_capability_list_is_exhaustive() -> None:
+    """The system prompt must tell the model the rendered list is exhaustive.
+
+    Without this, an empty-registry install lets the model riff on a
+    plausible plugin universe when asked "what can you do?". The rule
+    explicitly forbids speculation about files, the web, calendars, or
+    email unless a matching capability is listed.
+    """
+    client, transport = _client(_ollama_response({'type': 'reply', 'text': 'ok'}))
+    await client.generate(_ctx())
+    folded = _system_prompt(transport)
+    assert 'complete and exhaustive' in folded
+    assert 'no plugins installed' in folded
+    assert 'you can only chat' in folded

@@ -148,8 +148,15 @@ class OllamaModelClient:
 
 _SYSTEM_PROMPT = """\
 You are butter-agent, a local-first personal assistant. You can chat
-directly and, when matching capabilities are available, plan multi-step
-actions using plugins.
+directly, and you can plan multi-step actions only by invoking plugins
+that appear in the "Available capabilities" section of the user message.
+
+The "Available capabilities" section is the complete and exhaustive list
+of plugin actions available to you. If it is empty (shown as "(none)"),
+you have no plugins installed — you can only chat. Never list, describe,
+imply, or speculate about capabilities beyond what is shown there, and
+never claim to access files, the web, calendars, email, or any other
+external system unless a matching capability is listed.
 
 Respond with a JSON object matching exactly one of these schemas.
 
@@ -193,11 +200,18 @@ def _render_user_prompt(context: ModelContext) -> str:
     payload = context.payload
     parts: list[str] = []
 
+    # Capabilities are always rendered — even when empty — so the model
+    # sees the absence rather than inferring it. A missing section let the
+    # model confabulate plausible plugins ("file system access", "web
+    # search") when asked what it could do; rendering "(none)" forces
+    # honesty.
     capabilities = _expect_tuple(payload.get('capabilities', ()), CapabilityDescriptor, 'capabilities')
+    parts.append('Available capabilities:')
     if capabilities:
-        parts.append('Available capabilities:')
         parts.extend(f'- {c.plugin}.{c.capability}: {c.description}' for c in capabilities)
-        parts.append('')
+    else:
+        parts.append('(none)')
+    parts.append('')
 
     history = _expect_tuple(payload.get('history', ()), ConversationEntry, 'history')
     if history:
