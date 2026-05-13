@@ -101,13 +101,29 @@ class PluginSource:
 
 
 @dataclass(frozen=True, slots=True)
+class PluginPath:
+    """A locally-resolved plugin directory — for development workflows.
+
+    Bypasses the fetcher entirely; the loader uses the directory as-is.
+    Mutually exclusive with `PluginSource` within a single `[[plugin]]`
+    entry. `path` may use `~` and is left unexpanded here — the loader
+    resolves it just before reading the manifest.
+    """
+
+    path: str
+
+
+PluginDeclaration = PluginSource | PluginPath
+
+
+@dataclass(frozen=True, slots=True)
 class Config:
     """Top-level parsed config."""
 
     core: CoreConfig = field(default_factory=CoreConfig)
     model: ModelConfig = field(default_factory=ModelConfig)
     storage: StorageConfig = field(default_factory=StorageConfig)
-    plugins: tuple[PluginSource, ...] = ()
+    plugins: tuple[PluginDeclaration, ...] = ()
 
 
 # --- Pin enforcement ---------------------------------------------------------
@@ -177,10 +193,13 @@ def dump_config(config: Config) -> str:
     lines.append(f'provider = {_quote(config.storage.provider)}')
     lines.append(f'path = {_quote(config.storage.path)}')
 
-    for source in config.plugins:
+    for plugin in config.plugins:
         lines.append('')
         lines.append('[[plugin]]')
-        lines.append(f'source = {_quote(f"{source.repo}@{source.ref}")}')
+        if isinstance(plugin, PluginSource):
+            lines.append(f'source = {_quote(f"{plugin.repo}@{plugin.ref}")}')
+        else:
+            lines.append(f'path = {_quote(plugin.path)}')
 
     return '\n'.join(lines) + '\n'
 
@@ -255,19 +274,38 @@ def _parse_storage(section: dict[str, object]) -> StorageConfig:
     )
 
 
-def _parse_plugins(raw: object) -> tuple[PluginSource, ...]:
+def _parse_plugins(raw: object) -> tuple[PluginDeclaration, ...]:
     if not isinstance(raw, list):
         raise ConfigError('[[plugin]] must be an array of tables')
     return tuple(_parse_plugin(idx, item) for idx, item in enumerate(raw))
 
 
-def _parse_plugin(index: int, raw: object) -> PluginSource:
+def _parse_plugin(index: int, raw: object) -> PluginDeclaration:
+    """Parse one [[plugin]] entry as either a remote source or a local path.
+
+    Exactly one of `source` / `path` must be set. `source` is the
+    production form (pinned ref required); `path` is the local-dev form
+    (no ref — the caller iterates whatever is on disk).
+    """
     if not isinstance(raw, dict):
         raise ConfigError(f'[[plugin]] entry #{index + 1} must be a table')
-    source = raw.get('source')
-    if not isinstance(source, str) or not source:
-        raise ConfigError(f'[[plugin]] entry #{index + 1}: missing or empty string `source`')
 
+    has_source = 'source' in raw
+    has_path = 'path' in raw
+    if has_source and has_path:
+        raise ConfigError(f'[[plugin]] entry #{index + 1}: set either `source` or `path`, not both')
+    if not has_source and not has_path:
+        raise ConfigError(f'[[plugin]] entry #{index + 1}: missing `source` (production) or `path` (local-dev)')
+
+    if has_path:
+        path = raw['path']
+        if not isinstance(path, str) or not path:
+            raise ConfigError(f'[[plugin]] entry #{index + 1}: `path` must be a non-empty string')
+        return PluginPath(path=path)
+
+    source = raw['source']
+    if not isinstance(source, str) or not source:
+        raise ConfigError(f'[[plugin]] entry #{index + 1}: `source` must be a non-empty string')
     if '@' not in source:
         raise ConfigError(
             f'[[plugin]] entry #{index + 1}: source {source!r} is missing a pinned ref (expected e.g. github.com/user/repo@v0.1.0)',

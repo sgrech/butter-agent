@@ -1,0 +1,11 @@
+[plugin]
+name = "fake_flat"
+version = "0.1.0"
+entrypoint = "fake_plugin_flat:FlatPlugin"
+blast_radius = "read-only"
+
+[[capability]]
+name = "ping"
+description = "Returns pong from a flat-layout plugin."
+input_schema = {}
+output_schema = { reply = "string" }

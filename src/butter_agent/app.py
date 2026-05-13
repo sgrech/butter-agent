@@ -24,6 +24,7 @@ from butter_agent.cli_commands import build_default_commands
 from butter_agent.core.config import Config, load_config
 from butter_agent.core.context_manager import DefaultContextManager
 from butter_agent.core.loop import AgentLoop
+from butter_agent.core.plugin_source import PluginLoader
 from butter_agent.core.registry import RegistryBuilder
 from butter_agent.core.repl import InputSource, Output, Repl, ReplGateHandler, StdioInputSource, StdioOutput
 from butter_agent.core.task_executor import DefaultTaskExecutor
@@ -83,6 +84,7 @@ async def build_repl(
     input_source: InputSource | None = None,
     output: Output | None = None,
     config_path: Path | None = None,
+    plugin_loader: PluginLoader | None = None,
 ) -> App:
     """Compose a runnable `App` (Repl + database handle) from a validated `Config`.
 
@@ -98,7 +100,12 @@ async def build_repl(
 
     database = await Database.open(config.storage.path)
     history = await SqliteConversationHistory.create(database)
-    registry = RegistryBuilder(max_blast_radius=config.core.max_blast_radius).build()
+    loader = plugin_loader if plugin_loader is not None else PluginLoader()
+    loaded = loader.load_all(config.plugins)
+    builder = RegistryBuilder(max_blast_radius=config.core.max_blast_radius)
+    for entry in loaded:
+        builder.register(entry.manifest, entry.plugin)
+    registry = builder.build()
 
     context_manager = DefaultContextManager(registry, history)
     model = OllamaModelClient(
