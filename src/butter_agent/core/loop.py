@@ -114,7 +114,7 @@ class ExecutionResult:
     """
 
     plan: TaskPlan
-    outputs: dict[str, object] = field(default_factory=dict)
+    outputs: dict[str, dict[str, object]] = field(default_factory=dict)
     halted_at_step: int | None = None
     halt_reason: str | None = None
 
