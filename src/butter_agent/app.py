@@ -20,6 +20,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+from butter_agent.cli_commands import build_default_commands
 from butter_agent.core.config import Config, load_config
 from butter_agent.core.context_manager import DefaultContextManager
 from butter_agent.core.loop import AgentLoop
@@ -81,6 +82,7 @@ async def build_repl(
     *,
     input_source: InputSource | None = None,
     output: Output | None = None,
+    config_path: Path | None = None,
 ) -> App:
     """Compose a runnable `App` (Repl + database handle) from a validated `Config`.
 
@@ -104,7 +106,12 @@ async def build_repl(
     executor = DefaultTaskExecutor(registry, gate_handler)
     loop = AgentLoop(context_manager, model, executor)
 
-    repl = Repl(loop, io_in, io_out, banner=_format_banner(config))
+    commands = build_default_commands(
+        config=config,
+        config_path=config_path if config_path is not None else resolve_config_path(),
+        plugin_count=len(registry),
+    )
+    repl = Repl(loop, io_in, io_out, banner=_format_banner(config), commands=commands)
     return App(repl=repl, database=database)
 
 
