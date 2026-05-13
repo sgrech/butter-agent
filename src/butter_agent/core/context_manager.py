@@ -135,12 +135,18 @@ class KeywordCapabilityFilter:
     Falls back to the first `top_k` capabilities (in registration order) when
     no capability shares any token with the input — the model still needs
     *something* to plan with, but never the entire registry.
+
+    Per-descriptor token sets are memoised on the filter instance. Because the
+    registry is frozen at startup (invariant #2) the same descriptor objects
+    are handed in turn after turn, so the cache amortises tokenisation across
+    the process lifetime.
     """
 
     def __init__(self, top_k: int = 8) -> None:
         if top_k <= 0:
             raise ValueError('top_k must be positive')
         self._top_k = top_k
+        self._haystack_cache: dict[CapabilityDescriptor, frozenset[str]] = {}
 
     def select(
         self,
@@ -152,12 +158,19 @@ class KeywordCapabilityFilter:
         tokens = _tokenise(turn.user_input)
         if not tokens:
             return available[: self._top_k]
-        scored = [(_score(desc, tokens), idx, desc) for idx, desc in enumerate(available)]
+        scored = [(len(tokens & self._haystack(desc)), idx, desc) for idx, desc in enumerate(available)]
         # Sort by descending score, then by registration order to break ties deterministically.
         scored.sort(key=lambda triple: (-triple[0], triple[1]))
         if scored[0][0] == 0:
             return available[: self._top_k]
         return tuple(desc for _, _, desc in scored[: self._top_k])
+
+    def _haystack(self, desc: CapabilityDescriptor) -> frozenset[str]:
+        cached = self._haystack_cache.get(desc)
+        if cached is None:
+            cached = _tokenise(f'{desc.plugin} {desc.capability} {desc.description}')
+            self._haystack_cache[desc] = cached
+        return cached
 
 
 _TOKEN_SPLIT = re.compile(r'\W+')
@@ -165,11 +178,6 @@ _TOKEN_SPLIT = re.compile(r'\W+')
 
 def _tokenise(text: str) -> frozenset[str]:
     return frozenset(token for token in _TOKEN_SPLIT.split(text.lower()) if token)
-
-
-def _score(desc: CapabilityDescriptor, tokens: frozenset[str]) -> int:
-    haystack = _tokenise(f'{desc.plugin} {desc.capability} {desc.description}')
-    return len(tokens & haystack)
 
 
 # --- The context manager -----------------------------------------------------
@@ -202,16 +210,16 @@ class DefaultContextManager:
             raise ValueError('history_window must be non-negative')
         if memory_top_k < 0:
             raise ValueError('memory_top_k must be non-negative')
-        self._registry = registry
         self._history = history
         self._memory: MemoryRetriever = memory if memory is not None else NullMemoryRetriever()
         self._capability_filter: CapabilityFilter = capability_filter if capability_filter is not None else KeywordCapabilityFilter()
         self._history_window = history_window
         self._memory_top_k = memory_top_k
+        # Registry is frozen post-startup (invariant #2), so the descriptor view is computed once.
+        self._descriptors = _all_descriptors(registry)
 
     async def assemble(self, turn: Turn) -> ModelContext:
-        descriptors = _all_descriptors(self._registry)
-        capabilities = self._capability_filter.select(turn, descriptors)
+        capabilities = self._capability_filter.select(turn, self._descriptors)
         history = await self._history.recent(self._history_window) if self._history_window else ()
         memory = await self._memory.retrieve(turn.user_input, self._memory_top_k) if self._memory_top_k else ()
         payload: dict[str, object] = {
