@@ -28,6 +28,7 @@ What this module does NOT do:
 
 from __future__ import annotations
 
+import math
 import tomllib
 from dataclasses import dataclass, field
 from typing import Final
@@ -287,11 +288,13 @@ def _parse_plugin(index: int, raw: object) -> PluginSource:
 
 
 def _optional_positive_float(section: dict[str, object], path: str, key: str) -> float | None:
-    """Parse an optional positive float (e.g. a timeout). Returns None when absent.
+    """Parse an optional positive finite float (e.g. a timeout). Returns None when absent.
 
-    Rejects zero and negative values — a zero timeout would never make a
-    successful request, and negative timeouts are nonsense in this context.
-    Booleans are explicitly rejected because Python treats them as ints.
+    Rejects zero, negative, and non-finite values. TOML 1.0 explicitly
+    permits `nan`/`inf` as float literals, so without the `isfinite`
+    guard a value of `nan` would slip past the positive check (every
+    comparison with NaN is False) and surface later as a transport
+    error. Booleans are rejected because Python treats them as ints.
     """
     if key not in section:
         return None
@@ -299,6 +302,8 @@ def _optional_positive_float(section: dict[str, object], path: str, key: str) ->
     if isinstance(value, bool) or not isinstance(value, int | float):
         raise ConfigError(f'{path}: expected number, got {type(value).__name__}')
     numeric = float(value)
+    if not math.isfinite(numeric):
+        raise ConfigError(f'{path}: expected finite number, got {numeric}')
     if numeric <= 0:
         raise ConfigError(f'{path}: expected positive number, got {numeric}')
     return numeric

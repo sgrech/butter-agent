@@ -483,5 +483,10 @@ async def test_transport_wraps_timeout_as_protocol_error(monkeypatch: pytest.Mon
 
     monkeypatch.setattr(urllib.request, 'urlopen', _raise_timeout)
     transport = _UrllibTransport()
-    with pytest.raises(ModelProtocolError, match='timed out after'):
-        await transport.post('http://example.invalid/api/chat', {'model': 'x', 'messages': []}, timeout=5.0)
+    # 12.5s must render as "12.5s" (not "12s" — `:.0f` would round it) and
+    # the diagnostic must NOT hardcode a specific config filename because
+    # `--config` may point somewhere other than the XDG default.
+    with pytest.raises(ModelProtocolError, match=r'timed out after 12\.5s') as info:
+        await transport.post('http://example.invalid/api/chat', {'model': 'x', 'messages': []}, timeout=12.5)
+    assert 'config.toml' not in str(info.value)
+    assert 'timeout_seconds' in str(info.value)

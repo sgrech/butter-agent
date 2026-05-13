@@ -13,6 +13,7 @@ preserves invariant #1's "runtime never reshapes" guarantee.
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 
 from butter_agent.core.config import Config, ConfigError, CoreConfig, ModelConfig, StorageConfig, dump_config
@@ -72,13 +73,19 @@ async def _prompt(io_in: InputSource, output: Output, label: str, current: str) 
 
 
 async def _prompt_positive_float(io_in: InputSource, output: Output, label: str, current: float) -> float:
-    """Prompt for a positive float; re-prompt on non-numeric or non-positive input."""
+    """Prompt for a positive finite float; re-prompt on invalid input."""
     while True:
         raw = await _prompt(io_in, output, label, str(current))
         try:
             value = float(raw)
         except ValueError:
             output.write(f'  [invalid] {raw!r} is not a number\n')
+            continue
+        # `nan`/`inf` parse successfully via float() but make no sense as
+        # a timeout — and NaN slips past the positivity check because every
+        # comparison with NaN is False.
+        if not math.isfinite(value):
+            output.write(f'  [invalid] {label} must be a finite number, got {value}\n')
             continue
         if value <= 0:
             output.write(f'  [invalid] {label} must be positive, got {value}\n')

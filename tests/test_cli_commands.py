@@ -169,14 +169,15 @@ async def test_configure_keeps_unchanged_values_on_blank_input(tmp_path: Path) -
 
 
 async def test_configure_reprompts_on_invalid_timeout(tmp_path: Path) -> None:
-    """Non-numeric and non-positive timeouts re-prompt rather than crashing."""
+    """Non-numeric, non-finite, and non-positive timeouts re-prompt rather than crashing."""
     config_path = tmp_path / 'config.toml'
     original = Config()
-    inputs = _ScriptedInput(['', '', '', 'soon', '-5', '180', '', ''])
+    inputs = _ScriptedInput(['', '', '', 'soon', 'nan', '-5', '180', '', ''])
     out = _Recording()
     await ConfigureCommand(config=original, config_path=config_path).run('', inputs, out)
     rendered = out.buffer.getvalue()
-    assert rendered.count('[invalid]') >= 2
+    # Three rejected inputs → three [invalid] lines before the accepted 180.
+    assert rendered.count('[invalid]') >= 3
     written = load_config(config_path.read_text())
     assert written.model.timeout_seconds == 180.0
 
