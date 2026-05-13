@@ -36,7 +36,8 @@ class _StubContextManager:
 
     async def assemble(self, turn: Turn, execution: ExecutionResult | None = None) -> ModelContext:
         self.calls.append(turn)
-        payload: dict[str, object] = {'history': []}
+        # Mirror DefaultContextManager: history is a tuple, not a list.
+        payload: dict[str, object] = {'history': ()}
         if execution is not None:
             payload['execution'] = execution
         return ModelContext(turn=turn, payload=payload)
@@ -48,7 +49,9 @@ class _StubModel:
 
     Holds a deque rather than a single value so the same stub can serve
     the intent-recognition pass and the synthesis pass with distinct
-    outputs. Raises if exhausted to surface unexpected extra calls.
+    outputs. Surfaces unexpected extra calls as `IndexError` from the
+    underlying `deque.popleft()` — a noisy failure that points at the
+    test's wiring rather than at the loop.
     """
 
     outputs: deque[ModelOutput]
