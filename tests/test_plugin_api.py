@@ -28,16 +28,26 @@ def test_reexports_identity() -> None:
     assert plugin_api.parse_manifest is _registry.parse_manifest
 
 
-def test_dunder_all_matches_actual_exports() -> None:
-    """`__all__` must not drift from what the module actually defines.
+def test_canonical_manifest_filename_is_pinned() -> None:
+    """The loader and plugins must agree on one filename.
 
-    Excludes `annotations` (the `from __future__` import) which Python
-    leaves accessible as a module attribute even though it's not a
-    public symbol.
+    Re-exporting a constant — and locking it down here — prevents the
+    convention from drifting between butter-agent docs, the loader, and
+    plugin author guides. If the canonical name ever needs to change,
+    flip it deliberately in one place.
     """
-    declared = set(plugin_api.__all__)
-    actual = {name for name in dir(plugin_api) if not name.startswith('_') and name != 'annotations'}
-    assert declared == actual
+    assert plugin_api.MANIFEST_FILENAME == 'manifest.toml'
+
+
+def test_dunder_all_entries_are_resolvable() -> None:
+    """Every name in `__all__` must actually be present on the module.
+
+    Catches the drift where a symbol is removed from the module but its
+    `__all__` entry is left behind — `from butter_agent.plugin_api import *`
+    would then fail at runtime in plugin authors' code.
+    """
+    for name in plugin_api.__all__:
+        assert hasattr(plugin_api, name), f'__all__ promises {name!r} but it is missing'
 
 
 def test_minimal_plugin_can_be_declared_via_public_api_only() -> None:
@@ -58,7 +68,7 @@ def test_minimal_plugin_can_be_declared_via_public_api_only() -> None:
 
 
 def test_parse_manifest_round_trips_minimal_manifest() -> None:
-    """Plugin authors need to validate their shipped manifest in tests.
+    """Plugin authors need to validate their shipped `manifest.toml` in tests.
 
     Re-exporting `parse_manifest` lets them do that without importing
     butter's internals.

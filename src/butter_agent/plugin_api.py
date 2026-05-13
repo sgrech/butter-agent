@@ -15,6 +15,9 @@ What's re-exported:
 - `parse_manifest` — convenience for tests that want to validate the
   plugin's shipped `manifest.toml` round-trips through butter's
   validation.
+- `MANIFEST_FILENAME` — the canonical filename butter's loader expects
+  at the root of a plugin repo. Re-exported so plugin authors and the
+  loader agree on a single source of truth.
 
 What's deliberately NOT re-exported:
 
@@ -31,6 +34,8 @@ symbols may be added; existing ones are frozen.
 
 from __future__ import annotations
 
+from typing import Final
+
 from butter_agent.core.registry import (
     BlastRadius,
     Capability,
@@ -41,7 +46,13 @@ from butter_agent.core.registry import (
     parse_manifest,
 )
 
+#: Canonical filename butter's loader looks for at the root of a plugin
+#: repo. Pinned here so plugins and the (future) `plugin_source` loader
+#: never disagree on the convention.
+MANIFEST_FILENAME: Final = 'manifest.toml'
+
 __all__ = [
+    'MANIFEST_FILENAME',
     'BlastRadius',
     'Capability',
     'CapabilityNotFoundError',
