@@ -23,6 +23,9 @@ network_allowlist = []
 provider = "ollama"
 model = "qwen3:8b"
 host = "http://localhost:11434"
+# Per-call timeout in seconds. 60 suits warm requests; bump it (e.g. 180)
+# if you regularly cold-load larger models over LAN.
+timeout_seconds = 60
 
 [storage]
 # Local SQLite by default. Path is expanded by the storage provider at

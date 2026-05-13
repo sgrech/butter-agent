@@ -117,6 +117,57 @@ def test_model_rejects_non_string_field() -> None:
         load_config('[model]\nprovider = 7')
 
 
+def test_model_timeout_seconds_override() -> None:
+    cfg = load_config('[model]\ntimeout_seconds = 180')
+    assert cfg.model.timeout_seconds == 180.0
+
+
+def test_model_timeout_seconds_accepts_floats() -> None:
+    cfg = load_config('[model]\ntimeout_seconds = 12.5')
+    assert cfg.model.timeout_seconds == 12.5
+
+
+def test_model_timeout_seconds_default_when_omitted() -> None:
+    assert load_config('').model.timeout_seconds == 60.0
+
+
+def test_model_timeout_seconds_rejects_zero() -> None:
+    with pytest.raises(ConfigError, match=r'model\.timeout_seconds.*positive'):
+        load_config('[model]\ntimeout_seconds = 0')
+
+
+def test_model_timeout_seconds_rejects_negative() -> None:
+    with pytest.raises(ConfigError, match=r'model\.timeout_seconds.*positive'):
+        load_config('[model]\ntimeout_seconds = -1')
+
+
+def test_model_timeout_seconds_rejects_non_numeric() -> None:
+    with pytest.raises(ConfigError, match=r'model\.timeout_seconds.*expected number'):
+        load_config('[model]\ntimeout_seconds = "fast"')
+
+
+def test_model_timeout_seconds_rejects_nan() -> None:
+    # TOML 1.0 permits `nan` as a float literal, and `nan <= 0` is False
+    # (every comparison with NaN is False), so without the isfinite guard
+    # NaN would slip past the positive check and surface later as an
+    # opaque transport error.
+    with pytest.raises(ConfigError, match=r'model\.timeout_seconds.*finite'):
+        load_config('[model]\ntimeout_seconds = nan')
+
+
+def test_model_timeout_seconds_rejects_inf() -> None:
+    with pytest.raises(ConfigError, match=r'model\.timeout_seconds.*finite'):
+        load_config('[model]\ntimeout_seconds = inf')
+
+
+def test_model_timeout_seconds_rejects_boolean() -> None:
+    # Python treats bool as int — guard explicitly so `true`/`false` aren't
+    # silently coerced to 1/0 (which would also fail the positive check
+    # but with a confusing error message).
+    with pytest.raises(ConfigError, match=r'model\.timeout_seconds.*expected number'):
+        load_config('[model]\ntimeout_seconds = true')
+
+
 # --- Storage section --------------------------------------------------------
 
 

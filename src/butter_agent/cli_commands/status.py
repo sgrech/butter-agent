@@ -28,6 +28,7 @@ class StatusCommand:
         output.write(f'  model.provider         = {cfg.model.provider}\n')
         output.write(f'  model.model            = {cfg.model.model}\n')
         output.write(f'  model.host             = {cfg.model.host}\n')
+        output.write(f'  model.timeout_seconds  = {cfg.model.timeout_seconds}\n')
         output.write(f'  storage.provider       = {cfg.storage.provider}\n')
         output.write(f'  storage.path           = {cfg.storage.path}\n')
         output.write(f'  core.max_blast_radius  = {cfg.core.max_blast_radius.value}\n')

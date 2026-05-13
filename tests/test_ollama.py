@@ -455,3 +455,38 @@ async def test_system_prompt_states_capability_list_is_exhaustive() -> None:
     assert 'complete and exhaustive' in folded
     assert 'no plugins installed' in folded
     assert 'you can only chat' in folded
+
+
+# --- Transport error wrapping (timeouts) ------------------------------------
+
+
+async def test_transport_wraps_timeout_as_protocol_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """TimeoutError from `urlopen(timeout=...)` must surface as ModelProtocolError.
+
+    Surfaced during the 2026-05-13 user-test: timeouts were escaping as
+    raw OSError because the original except clause only caught URLError /
+    ValueError. cli._cmd_start then treated them as fatal startup errors
+    and exited the REPL, instead of letting the loop print a model-error
+    line and accept another prompt.
+
+    Patched at the urlopen seam rather than relying on a real socket —
+    ECONNREFUSED on an unbound port surfaces as URLError, not
+    TimeoutError, so a "talk to port 1" approach would not exercise
+    this branch deterministically.
+    """
+    import urllib.request
+
+    from butter_agent.model.ollama import _UrllibTransport
+
+    def _raise_timeout(*args: object, **kwargs: object) -> object:
+        raise TimeoutError('socket timed out')
+
+    monkeypatch.setattr(urllib.request, 'urlopen', _raise_timeout)
+    transport = _UrllibTransport()
+    # 12.5s must render as "12.5s" (not "12s" — `:.0f` would round it) and
+    # the diagnostic must NOT hardcode a specific config filename because
+    # `--config` may point somewhere other than the XDG default.
+    with pytest.raises(ModelProtocolError, match=r'timed out after 12\.5s') as info:
+        await transport.post('http://example.invalid/api/chat', {'model': 'x', 'messages': []}, timeout=12.5)
+    assert 'config.toml' not in str(info.value)
+    assert 'timeout_seconds' in str(info.value)

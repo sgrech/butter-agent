@@ -101,7 +101,11 @@ async def build_repl(
     registry = RegistryBuilder(max_blast_radius=config.core.max_blast_radius).build()
 
     context_manager = DefaultContextManager(registry, history)
-    model = OllamaModelClient(host=config.model.host, model=config.model.model)
+    model = OllamaModelClient(
+        host=config.model.host,
+        model=config.model.model,
+        timeout_seconds=config.model.timeout_seconds,
+    )
     gate_handler = ReplGateHandler(io_in, io_out)
     executor = DefaultTaskExecutor(registry, gate_handler)
     loop = AgentLoop(context_manager, model, executor)
