@@ -375,3 +375,46 @@ async def test_payload_with_wrong_type_raises_protocol_error() -> None:
     bad_ctx = _ctx('hi', capabilities=['not a descriptor'])
     with pytest.raises(ModelProtocolError, match="'capabilities'"):
         await client.generate(bad_ctx)
+
+
+# --- System prompt content (PR C: identity + capability honesty) ------------
+
+
+def _system_prompt(transport: _FakeTransport) -> str:
+    """Return the system message content with newlines folded to spaces.
+
+    The prompt is hard-wrapped for readability, but the assertions below
+    care about logical phrases, not column-80 layout — folding whitespace
+    keeps the tests stable under future reflows.
+    """
+    body = transport.calls[-1][1]
+    messages = body['messages']
+    assert isinstance(messages, list)
+    system = messages[0]
+    assert isinstance(system, dict)
+    content = system['content']
+    assert isinstance(content, str)
+    return ' '.join(content.split())
+
+
+async def test_system_prompt_identifies_butter_agent() -> None:
+    client, transport = _client(_ollama_response({'type': 'reply', 'text': 'ok'}))
+    await client.generate(_ctx())
+    folded = _system_prompt(transport)
+    assert 'butter-agent' in folded
+    assert 'local-first' in folded
+    assert 'personal assistant' in folded
+
+
+async def test_system_prompt_forbids_fabricating_plans_without_capability() -> None:
+    """The no-plan-without-capability rule must be present verbatim enough
+    that future edits to the prompt cannot quietly drop it — empty-registry
+    installs depend on this rule to keep the model honest about what it
+    can and cannot do.
+    """
+    client, transport = _client(_ollama_response({'type': 'reply', 'text': 'ok'}))
+    await client.generate(_ctx(capabilities=()))
+    folded = _system_prompt(transport)
+    assert 'no matching capability' in folded
+    assert 'do not invent' in folded
+    assert 'fabricate a plan' in folded
