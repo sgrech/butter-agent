@@ -373,7 +373,8 @@ async def test_prompt_omits_empty_history_and_memory_sections() -> None:
 
 
 async def test_prompt_renders_empty_capabilities_explicitly() -> None:
-    """Empty registry must surface as `Available capabilities: (none)`.
+    """Empty registry must surface the `Available capabilities:` header
+    followed by `(none)` on the next line.
 
     Discovered during user-test on 2026-05-13: with the header omitted,
     the model invented capabilities ("file system access", "web search")
