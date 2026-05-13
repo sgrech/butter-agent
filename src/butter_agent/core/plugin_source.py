@@ -35,6 +35,7 @@ uses `GitFetcher`; tests use a stub returning a known fixture path.
 from __future__ import annotations
 
 import importlib
+import inspect
 import os
 import subprocess
 import sys
@@ -198,7 +199,7 @@ def _import_entrypoint(plugin_dir: Path, manifest: PluginManifest) -> Plugin:
 
     src_dir = plugin_dir / 'src'
     import_root = src_dir if src_dir.is_dir() else plugin_dir
-    root_str = str(import_root)
+    root_str = str(import_root.resolve())
     if root_str not in sys.path:
         sys.path.insert(0, root_str)
 
@@ -207,6 +208,23 @@ def _import_entrypoint(plugin_dir: Path, manifest: PluginManifest) -> Plugin:
     except ImportError as exc:
         raise PluginLoadError(
             f'plugin {manifest.name!r}: could not import {module_path!r} from {import_root}: {exc}',
+        ) from exc
+
+    # Guard against sys.modules cache collisions: `import_module` returns the
+    # already-loaded module if the same top-level name was imported earlier,
+    # which would silently route to the wrong plugin if two plugins shared a
+    # package name. Verify the resolved module actually lives under our
+    # import root before trusting it.
+    module_file = getattr(module, '__file__', None)
+    if module_file is None:
+        raise PluginLoadError(
+            f'plugin {manifest.name!r}: imported module {module_path!r} has no __file__ — cannot verify it belongs to this plugin (namespace package or builtin?)',
+        )
+    try:
+        Path(module_file).resolve().relative_to(import_root.resolve())
+    except ValueError as exc:
+        raise PluginLoadError(
+            f'plugin {manifest.name!r}: module {module_path!r} resolved to {module_file} which is outside the plugin root {import_root} — another plugin or package likely shadows this name. Rename your top-level package to something unique.',
         ) from exc
 
     try:
@@ -232,6 +250,13 @@ def _import_entrypoint(plugin_dir: Path, manifest: PluginManifest) -> Plugin:
     if execute is None or not callable(execute):
         raise PluginLoadError(
             f'plugin {manifest.name!r}: {manifest.entrypoint} does not implement the Plugin Protocol (missing async `execute`)',
+        )
+    # The runtime contract awaits `execute`; a sync def would only blow up at
+    # the first invocation. Catch that at load time so the plugin author sees
+    # a clear diagnostic instead of a downstream `TypeError`.
+    if not inspect.iscoroutinefunction(execute):
+        raise PluginLoadError(
+            f'plugin {manifest.name!r}: {manifest.entrypoint}.execute must be `async def` — synchronous execute methods are not supported by the Plugin Protocol',
         )
     # Structural Plugin Protocol — cast through `object` to satisfy mypy
     # since `cls()` returned `Any`. The runtime hasattr check above is the

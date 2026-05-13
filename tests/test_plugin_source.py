@@ -172,6 +172,80 @@ output_schema = {}
         loader.load_all([PluginPath(path=str(tmp_path))])
 
 
+def test_sync_execute_rejected_at_load_time(tmp_path: Path) -> None:
+    """A non-async `execute` would only blow up at first call — catch it early."""
+    pkg_dir = tmp_path / 'src' / 'mod_sync_execute'
+    pkg_dir.mkdir(parents=True)
+    (pkg_dir / '__init__.py').write_text('class Plugin:\n    def execute(self, capability, inputs):\n        return {}\n')
+    (tmp_path / 'manifest.toml').write_text(
+        """
+[plugin]
+name = "broken_sync"
+version = "0.1.0"
+entrypoint = "mod_sync_execute:Plugin"
+blast_radius = "read-only"
+
+[[capability]]
+name = "x"
+description = "x"
+input_schema = {}
+output_schema = {}
+"""
+    )
+    loader = PluginLoader(fetcher=_StubFetcher({}))
+    with pytest.raises(PluginLoadError, match='must be `async def`'):
+        loader.load_all([PluginPath(path=str(tmp_path))])
+
+
+def test_module_collision_with_sys_modules_rejected(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A pre-loaded module shadowing the entrypoint name must error, not silently swap.
+
+    Simulates the case where another plugin (or the host env) already
+    occupies the same top-level module name. Without the resolve-and-
+    compare guard, `import_module` would hand back the shadow and the
+    wrong class would get instantiated.
+    """
+    pkg_dir = tmp_path / 'src' / 'colliding_pkg'
+    pkg_dir.mkdir(parents=True)
+    (pkg_dir / '__init__.py').write_text('class Plugin:\n    async def execute(self, c, i): return {}\n')
+    (tmp_path / 'manifest.toml').write_text(
+        """
+[plugin]
+name = "colliding"
+version = "0.1.0"
+entrypoint = "colliding_pkg:Plugin"
+blast_radius = "read-only"
+
+[[capability]]
+name = "x"
+description = "x"
+input_schema = {}
+output_schema = {}
+"""
+    )
+
+    # Plant a fake `colliding_pkg` module from somewhere *outside* the plugin
+    # root so the import returns the shadow instead of ours.
+    fake_dir = tmp_path / 'somewhere_else'
+    fake_dir.mkdir()
+    fake_file = fake_dir / 'colliding_pkg.py'
+    fake_file.write_text('# unrelated module\n')
+    import importlib.util as _importutil
+    import types
+
+    spec = _importutil.spec_from_file_location('colliding_pkg', fake_file)
+    assert spec is not None and spec.loader is not None
+    shadow = _importutil.module_from_spec(spec)
+    spec.loader.exec_module(shadow)
+    monkeypatch.setitem(sys.modules, 'colliding_pkg', shadow)
+    # Keep the linter happy.
+    del types
+
+    loader = PluginLoader(fetcher=_StubFetcher({}))
+    with pytest.raises(PluginLoadError, match='outside the plugin root'):
+        loader.load_all([PluginPath(path=str(tmp_path))])
+
+
 def test_instance_without_execute_raises(tmp_path: Path) -> None:
     pkg_dir = tmp_path / 'src' / 'mod_no_execute'
     pkg_dir.mkdir(parents=True)
