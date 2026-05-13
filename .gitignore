@@ -216,3 +216,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Per-session Claude Code debrief artifact — local only, never committed.
+.claude/next-session.md
