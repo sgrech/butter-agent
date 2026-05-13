@@ -1,0 +1,37 @@
+# butter-agent default config.
+#
+# An empty document is valid — every section below shows the defaults
+# applied when omitted. Edit a value to override it; delete a section to
+# fall back to defaults.
+
+[core]
+# Invariant #7 ceiling. A plugin whose manifest declares a broader radius
+# than this is rejected at registry build time. Valid tiers (broadest last):
+#   read-only       no side effects
+#   local-write     local filesystem / local DB writes
+#   network         outbound network requests
+max_blast_radius = "network"
+
+# Future-facing hook: hosts a `network` plugin may reach. Empty means
+# "no restriction beyond the radius itself" — the plugin source-fetch
+# module will enforce this once it lands.
+network_allowlist = []
+
+[model]
+# Local-first default per scope. Ollama with Qwen3 8B; swap provider for
+# anything that implements the ModelClient protocol.
+provider = "ollama"
+model = "qwen3:8b"
+host = "http://localhost:11434"
+
+[storage]
+# Local SQLite by default. Path is expanded by the storage provider at
+# startup — `~` is left as-is here.
+provider = "sqlite"
+path = "~/.butter-agent/butter.db"
+
+# External plugin sources. Each [[plugin]] entry requires a pinned ref —
+# branch refs (main / master / HEAD) are rejected at parse time.
+#
+# [[plugin]]
+# source = "github.com/example/notes@v0.1.0"
