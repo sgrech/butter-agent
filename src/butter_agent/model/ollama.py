@@ -86,16 +86,20 @@ class _UrllibTransport:
         return await asyncio.to_thread(self._post_sync, url, body, timeout)
 
     def _post_sync(self, url: str, body: dict[str, object], timeout: float) -> dict[str, object]:
-        request = urllib.request.Request(
-            url,
-            data=json.dumps(body).encode('utf-8'),
-            headers={'Content-Type': 'application/json'},
-            method='POST',
-        )
         try:
+            request = urllib.request.Request(
+                url,
+                data=json.dumps(body).encode('utf-8'),
+                headers={'Content-Type': 'application/json'},
+                method='POST',
+            )
             with urllib.request.urlopen(request, timeout=timeout) as response:
                 raw = response.read()
-        except urllib.error.URLError as exc:
+        except (urllib.error.URLError, ValueError) as exc:
+            # Both Request(url=...) and urlopen() can raise ValueError for
+            # unsupported / malformed URLs (e.g. missing scheme). Treat
+            # alongside URLError so the adapter's promise of uniform
+            # ModelProtocolError surfacing holds.
             raise ModelProtocolError(f'ollama transport error: {exc}') from exc
         try:
             parsed = json.loads(raw)
@@ -284,7 +288,10 @@ def _parse_step(index: int, raw: object) -> PlanStep:
         raise ModelProtocolError(f'plan.steps[{index}].inputs must be an object')
 
     gate = raw.get('gate', 'none')
-    if gate not in _VALID_GATES:
+    if not isinstance(gate, str) or gate not in _VALID_GATES:
+        # Guard the isinstance check first: `in _VALID_GATES` would raise
+        # TypeError for unhashable JSON shapes (dict/list), which would
+        # leak past the adapter's structural-error contract.
         valid = ', '.join(sorted(_VALID_GATES))
         raise ModelProtocolError(
             f'plan.steps[{index}].gate must be one of: {valid} (got {gate!r})',

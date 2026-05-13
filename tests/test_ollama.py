@@ -241,6 +241,18 @@ async def test_plan_rejects_bool_as_step_number() -> None:
 # --- Output parsing: top-level discrimination -------------------------------
 
 
+async def test_plan_rejects_non_string_gate() -> None:
+    # `gate not in _VALID_GATES` would raise TypeError for unhashable JSON
+    # shapes (dict/list). Adapter must surface this as ModelProtocolError.
+    plan_json: dict[str, object] = {
+        'type': 'plan',
+        'steps': [{'step': 1, 'plugin': 'p', 'capability': 'c', 'gate': {'nested': 'object'}}],
+    }
+    client, _ = _client(_ollama_response(plan_json))
+    with pytest.raises(ModelProtocolError, match='gate must be one of'):
+        await client.generate(_ctx())
+
+
 async def test_unknown_type_rejected() -> None:
     client, _ = _client(_ollama_response({'type': 'mystery'}))
     with pytest.raises(ModelProtocolError, match="'type' must be 'reply' or 'plan'"):
@@ -302,6 +314,15 @@ async def test_request_includes_system_and_user_messages() -> None:
     assert messages[1]['role'] == 'user'
     # The raw user input must appear verbatim in the user message.
     assert 'plan a trip' in _user_message(transport)
+
+
+async def test_default_transport_wraps_malformed_url_as_protocol_error() -> None:
+    # Default _UrllibTransport hits urllib.request.urlopen, which raises
+    # ValueError (not URLError) for unsupported / malformed URLs. The
+    # adapter promises uniform ModelProtocolError surfacing.
+    client = OllamaModelClient(host='not-a-url', timeout_seconds=1.0)
+    with pytest.raises(ModelProtocolError, match='transport error'):
+        await client.generate(_ctx())
 
 
 async def test_host_trailing_slash_normalised() -> None:
