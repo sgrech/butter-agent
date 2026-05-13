@@ -28,7 +28,7 @@ import re
 from dataclasses import dataclass
 from typing import Protocol
 
-from butter_agent.core.loop import ModelContext, Turn
+from butter_agent.core.loop import ExecutionResult, ModelContext, Turn
 from butter_agent.core.registry import PluginRegistry
 
 # --- Value types -------------------------------------------------------------
@@ -218,15 +218,21 @@ class DefaultContextManager:
         # Registry is frozen post-startup (invariant #2), so the descriptor view is computed once.
         self._descriptors = _all_descriptors(registry)
 
-    async def assemble(self, turn: Turn) -> ModelContext:
-        capabilities = self._capability_filter.select(turn, self._descriptors)
+    async def assemble(self, turn: Turn, execution: ExecutionResult | None = None) -> ModelContext:
         history = await self._history.recent(self._history_window) if self._history_window else ()
         memory = await self._memory.retrieve(turn.user_input, self._memory_top_k) if self._memory_top_k else ()
         payload: dict[str, object] = {
-            'capabilities': capabilities,
             'history': history,
             'memory': memory,
         }
+        if execution is None:
+            # Intent-recognition pass: model needs the capability menu to plan.
+            payload['capabilities'] = self._capability_filter.select(turn, self._descriptors)
+        else:
+            # Synthesis pass: model must reply, not plan. Capabilities are
+            # deliberately omitted so the prompt doesn't suggest more actions
+            # when the model has just observed tool outputs.
+            payload['execution'] = execution
         return ModelContext(turn=turn, payload=payload)
 
 

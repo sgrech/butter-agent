@@ -38,7 +38,7 @@ from butter_agent.core.repl import (
     StdioInputSource,
     StdioOutput,
 )
-from butter_agent.core.task_executor import Gate, GateDecision
+from butter_agent.core.task_executor import Gate, GateDecision, PlanValidationError
 
 # --- Test plumbing -----------------------------------------------------------
 
@@ -71,8 +71,11 @@ class _CapturingOutput:
 
 @dataclass
 class _StubContextManager:
-    async def assemble(self, turn: Turn) -> ModelContext:
-        return ModelContext(turn=turn, payload={})
+    async def assemble(self, turn: Turn, execution: ExecutionResult | None = None) -> ModelContext:
+        payload: dict[str, object] = {}
+        if execution is not None:
+            payload['execution'] = execution
+        return ModelContext(turn=turn, payload=payload)
 
 
 @dataclass
@@ -147,7 +150,7 @@ async def test_repl_strips_whitespace_before_dispatch() -> None:
 
     @dataclass
     class _RecordingCM:
-        async def assemble(self, turn: Turn) -> ModelContext:
+        async def assemble(self, turn: Turn, execution: ExecutionResult | None = None) -> ModelContext:
             captured.append(turn.user_input)
             return ModelContext(turn=turn, payload={})
 
@@ -161,15 +164,44 @@ async def test_repl_strips_whitespace_before_dispatch() -> None:
     assert captured == ['hello world']
 
 
-async def test_repl_renders_executed_plan_summary() -> None:
+async def test_repl_renders_synthesized_reply_after_plan() -> None:
+    # Successful plan execution + synthesis pass: the REPL renders the
+    # natural-language reply, NOT the raw output dicts. This is the user-
+    # facing behaviour that makes the agent feel conversational rather
+    # than like a tool dispatcher.
     step = PlanStep(step=1, plugin='notes', capability='create', inputs={}, gate='none', outputs_as='n')
     plan = TaskPlan(steps=(step,))
     execution = ExecutionResult(plan=plan, outputs={'n': {'id': 7}})
-    loop, _, _ = _wire(model_outputs=[plan], executor_results=[execution])
+    loop, _, _ = _wire(
+        model_outputs=[plan, ModelReply(text='Note created with id 7.')],
+        executor_results=[execution],
+    )
 
     inp = _ScriptedInput(lines=deque(['take a note']))
     out = _CapturingOutput()
     await Repl(loop, inp, out, banner='').run()
+
+    assert 'Note created with id 7.\n' in out.text
+    # Raw-output dump must NOT appear when synthesis succeeded.
+    assert '[plan executed:' not in out.text
+    assert '$n:' not in out.text
+
+
+async def test_repl_falls_back_to_raw_outputs_without_synthesis() -> None:
+    # Direct render path for callers that hand the REPL a TurnResult whose
+    # ExecutionResult has no synthesis_reply (e.g. legacy adapters or tests).
+    # Verifies the fallback is still functional after the synthesis-aware
+    # primary path was added.
+    from butter_agent.core.loop import TurnResult
+
+    step = PlanStep(step=1, plugin='notes', capability='create', inputs={}, gate='none', outputs_as='n')
+    plan = TaskPlan(steps=(step,))
+    execution = ExecutionResult(plan=plan, outputs={'n': {'id': 7}}, synthesis_reply=None)
+    turn = Turn(turn_id='t', user_input='note', timestamp=0.0)
+
+    out = _CapturingOutput()
+    repl = Repl(_wire(model_outputs=[])[0], _ScriptedInput(lines=deque()), out, banner='')
+    repl._render(TurnResult(turn=turn, executed_plan=execution))
 
     assert '[plan executed: 1 step(s)]' in out.text
     assert "$n: {'id': 7}" in out.text
@@ -203,6 +235,29 @@ async def test_repl_recovers_from_model_protocol_error() -> None:
     await Repl(loop, inp, out, banner='').run()
 
     assert '[error] model adapter: bad json' in out.text
+    assert 'ok\n' in out.text
+
+
+async def test_repl_recovers_from_executor_error() -> None:
+    # An executor that raises (e.g. PlanValidationError because the model
+    # emitted a plan missing a required input) must not crash the REPL.
+    @dataclass
+    class _RaisingExecutor:
+        async def execute(self, plan: TaskPlan) -> ExecutionResult:
+            raise PlanValidationError("step 1: missing required input 'tz'")
+
+    step = PlanStep(step=1, plugin='clock', capability='now', inputs={}, gate='none')
+    plan = TaskPlan(steps=(step,))
+    loop = AgentLoop(
+        context_manager=_StubContextManager(),
+        model=_ScriptedModel(outputs=deque([plan, ModelReply(text='ok')])),
+        executor=_RaisingExecutor(),
+    )
+    inp = _ScriptedInput(lines=deque(['first', 'second']))
+    out = _CapturingOutput()
+    await Repl(loop, inp, out, banner='').run()
+
+    assert "[error] plan rejected: step 1: missing required input 'tz'" in out.text
     assert 'ok\n' in out.text
 
 

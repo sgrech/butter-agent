@@ -23,7 +23,7 @@ from butter_agent.core.context_manager import (
     MemorySnippet,
     NullMemoryRetriever,
 )
-from butter_agent.core.loop import Turn
+from butter_agent.core.loop import ExecutionResult, PlanStep, TaskPlan, Turn
 from butter_agent.core.registry import (
     BlastRadius,
     PluginRegistry,
@@ -189,6 +189,46 @@ async def test_assemble_skips_memory_when_top_k_is_zero() -> None:
 
     assert memory.calls == []
     assert context.payload['memory'] == ()
+
+
+async def test_assemble_synthesis_attaches_execution_and_omits_capabilities() -> None:
+    # Synthesis-mode assembly: model is about to summarise a plan that just
+    # ran. Capabilities are deliberately omitted so the prompt does not
+    # nudge the model toward proposing more actions; the execution result
+    # is attached so the adapter can render it into the user prompt.
+    registry = _registry(('notes', (('create', 'Create a note'),)))
+    cm = DefaultContextManager(registry, InMemoryConversationHistory())
+    plan = TaskPlan(
+        steps=(PlanStep(step=1, plugin='notes', capability='create', inputs={}, gate='none', outputs_as='n'),),
+    )
+    execution = ExecutionResult(plan=plan, outputs={'n': {'id': 7}})
+
+    context = await cm.assemble(_turn('save a note'), execution=execution)
+
+    assert context.payload['execution'] is execution
+    assert 'capabilities' not in context.payload
+
+
+async def test_assemble_synthesis_still_surfaces_history_and_memory() -> None:
+    # History and memory remain relevant during synthesis — the model still
+    # needs prior conversation context to phrase its reply naturally.
+    registry = _registry(('notes', (('create', 'Create a note'),)))
+    history = InMemoryConversationHistory()
+    await history.append(ConversationEntry(turn_id='t0', user_input='hi', assistant_reply='hello', timestamp=0.0))
+    snippets = (MemorySnippet(source='memory-mcp', content='user prefers terse replies'),)
+    memory = _RecordingMemory(snippets=snippets)
+    cm = DefaultContextManager(registry, history, memory=memory)
+    execution = ExecutionResult(
+        plan=TaskPlan(steps=(PlanStep(step=1, plugin='notes', capability='create', inputs={}, gate='none'),)),
+        outputs={},
+    )
+
+    context = await cm.assemble(_turn('save it'), execution=execution)
+
+    assert context.payload['memory'] == snippets
+    surfaced = context.payload['history']
+    assert isinstance(surfaced, tuple)
+    assert [entry.turn_id for entry in surfaced] == ['t0']
 
 
 def test_negative_history_window_rejected() -> None:

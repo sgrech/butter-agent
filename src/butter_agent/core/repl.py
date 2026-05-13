@@ -34,6 +34,7 @@ from butter_agent.core.loop import (
     TurnResult,
 )
 from butter_agent.core.task_executor import (
+    ExecutorError,
     Gate,
     GateDecision,
 )
@@ -204,7 +205,8 @@ class Repl:
     per invariant #1). `run()` blocks until the input source signals EOF.
 
     Blank input is ignored (no turn dispatched). `ModelProtocolError`
-    raised by the loop is rendered as a single-line diagnostic and the
+    (bad model output) and `ExecutorError` (plan validation or variable
+    resolution failures) are rendered as single-line diagnostics and the
     REPL keeps running — the loop itself does not retry or guess, so the
     user can correct and retry.
     """
@@ -247,6 +249,9 @@ class Repl:
             except ModelProtocolError as exc:
                 self._output.write(f'[error] model adapter: {exc}\n')
                 continue
+            except ExecutorError as exc:
+                self._output.write(f'[error] plan rejected: {exc}\n')
+                continue
             self._render(result)
 
     async def _dispatch_command(self, line: str) -> bool:
@@ -275,6 +280,15 @@ class Repl:
         if execution.halted_at_step is not None:
             self._output.write(f'[halted at step {execution.halted_at_step}] {execution.halt_reason}\n')
             return
+        if execution.synthesis_reply is not None:
+            # Successful execution went through the synthesis pass. The
+            # synthesized reply is the assistant surface; the executed plan
+            # is implementation detail that's already in conversation history.
+            self._output.write(f'{execution.synthesis_reply.text}\n')
+            return
+        # Fallback for executions that bypassed synthesis (e.g. test wiring
+        # without a synthesis step). Render the raw outputs so the operator
+        # still sees what ran.
         self._output.write(f'[plan executed: {len(execution.plan.steps)} step(s)]\n')
         for alias, fields in execution.outputs.items():
             self._output.write(f'  ${alias}: {dict(fields)!r}\n')
