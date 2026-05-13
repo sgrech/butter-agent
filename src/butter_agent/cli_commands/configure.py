@@ -38,6 +38,7 @@ class ConfigureCommand:
             provider = await _prompt(io_in, output, 'model.provider', self._config.model.provider)
             model = await _prompt(io_in, output, 'model.model', self._config.model.model)
             host = await _prompt(io_in, output, 'model.host', self._config.model.host)
+            timeout = await _prompt_positive_float(io_in, output, 'model.timeout_seconds', self._config.model.timeout_seconds)
             storage_path = await _prompt(io_in, output, 'storage.path', self._config.storage.path)
             radius = await _prompt_radius(io_in, output, self._config.core.max_blast_radius)
         except EOFError:
@@ -46,7 +47,7 @@ class ConfigureCommand:
 
         new_config = Config(
             core=CoreConfig(max_blast_radius=radius, network_allowlist=self._config.core.network_allowlist),
-            model=ModelConfig(provider=provider, model=model, host=host),
+            model=ModelConfig(provider=provider, model=model, host=host, timeout_seconds=timeout),
             storage=StorageConfig(provider=self._config.storage.provider, path=storage_path),
             plugins=self._config.plugins,
         )
@@ -68,6 +69,21 @@ async def _prompt(io_in: InputSource, output: Output, label: str, current: str) 
     answer = await io_in.read_line(f'  {label} [{current}]: ')
     stripped = answer.strip()
     return stripped if stripped else current
+
+
+async def _prompt_positive_float(io_in: InputSource, output: Output, label: str, current: float) -> float:
+    """Prompt for a positive float; re-prompt on non-numeric or non-positive input."""
+    while True:
+        raw = await _prompt(io_in, output, label, str(current))
+        try:
+            value = float(raw)
+        except ValueError:
+            output.write(f'  [invalid] {raw!r} is not a number\n')
+            continue
+        if value <= 0:
+            output.write(f'  [invalid] {label} must be positive, got {value}\n')
+            continue
+        return value
 
 
 async def _prompt_radius(io_in: InputSource, output: Output, current: BlastRadius) -> BlastRadius:

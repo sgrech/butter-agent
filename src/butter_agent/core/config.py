@@ -64,11 +64,17 @@ class CoreConfig:
 
 @dataclass(frozen=True, slots=True)
 class ModelConfig:
-    """Model provider selection — Ollama / Qwen3 8B is the documented default."""
+    """Model provider selection — Ollama / Qwen3 8B is the documented default.
+
+    `timeout_seconds` bounds a single model call. 60s is enough for warm
+    requests; cold-load on a LAN host can easily exceed that, so the
+    field is exposed in config.toml for users on slower setups.
+    """
 
     provider: str = 'ollama'
     model: str = 'qwen3:8b'
     host: str = 'http://localhost:11434'
+    timeout_seconds: float = 60.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -163,6 +169,7 @@ def dump_config(config: Config) -> str:
     lines.append(f'provider = {_quote(config.model.provider)}')
     lines.append(f'model = {_quote(config.model.model)}')
     lines.append(f'host = {_quote(config.model.host)}')
+    lines.append(f'timeout_seconds = {_format_number(config.model.timeout_seconds)}')
     lines.append('')
 
     lines.append('[storage]')
@@ -175,6 +182,13 @@ def dump_config(config: Config) -> str:
         lines.append(f'source = {_quote(f"{source.repo}@{source.ref}")}')
 
     return '\n'.join(lines) + '\n'
+
+
+def _format_number(value: float) -> str:
+    """Render a number for TOML output without a redundant trailing '.0'."""
+    if value.is_integer():
+        return str(int(value))
+    return repr(value)
 
 
 def _quote(value: str) -> str:
@@ -223,10 +237,12 @@ def _parse_core(section: dict[str, object]) -> CoreConfig:
 
 def _parse_model(section: dict[str, object]) -> ModelConfig:
     defaults = ModelConfig()
+    timeout = _optional_positive_float(section, 'model.timeout_seconds', 'timeout_seconds')
     return ModelConfig(
         provider=_optional_str(section, 'model.provider', 'provider') or defaults.provider,
         model=_optional_str(section, 'model.model', 'model') or defaults.model,
         host=_optional_str(section, 'model.host', 'host') or defaults.host,
+        timeout_seconds=timeout if timeout is not None else defaults.timeout_seconds,
     )
 
 
@@ -268,6 +284,24 @@ def _parse_plugin(index: int, raw: object) -> PluginSource:
 
 
 # --- Field helpers -----------------------------------------------------------
+
+
+def _optional_positive_float(section: dict[str, object], path: str, key: str) -> float | None:
+    """Parse an optional positive float (e.g. a timeout). Returns None when absent.
+
+    Rejects zero and negative values — a zero timeout would never make a
+    successful request, and negative timeouts are nonsense in this context.
+    Booleans are explicitly rejected because Python treats them as ints.
+    """
+    if key not in section:
+        return None
+    value = section[key]
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        raise ConfigError(f'{path}: expected number, got {type(value).__name__}')
+    numeric = float(value)
+    if numeric <= 0:
+        raise ConfigError(f'{path}: expected positive number, got {numeric}')
+    return numeric
 
 
 def _optional_str(section: dict[str, object], path: str, key: str) -> str | None:

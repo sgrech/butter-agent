@@ -124,6 +124,7 @@ async def test_status_prints_resolved_config() -> None:
     assert '/tmp/butter.db' in rendered
     assert 'plugins.registered' in rendered
     assert 'core.max_blast_radius' in rendered
+    assert 'model.timeout_seconds' in rendered
     # The legacy abbreviated label must not leak back in.
     assert 'core.max_radius' not in rendered
 
@@ -141,6 +142,7 @@ async def test_configure_writes_roundtrippable_file(tmp_path: Path) -> None:
             '',  # model.provider — keep
             'qwen3:4b',  # model.model
             '',  # model.host — keep
+            '',  # model.timeout_seconds — keep
             '/custom/butter.db',  # storage.path
             'local-write',  # core.max_blast_radius
         ]
@@ -161,15 +163,28 @@ async def test_configure_writes_roundtrippable_file(tmp_path: Path) -> None:
 async def test_configure_keeps_unchanged_values_on_blank_input(tmp_path: Path) -> None:
     config_path = tmp_path / 'config.toml'
     original = Config(model=ModelConfig(model='qwen3:8b', host='http://localhost:11434'))
-    inputs = _ScriptedInput(['', '', '', '', ''])
+    inputs = _ScriptedInput(['', '', '', '', '', ''])
     await ConfigureCommand(config=original, config_path=config_path).run('', inputs, _Recording())
     assert load_config(config_path.read_text()) == original
+
+
+async def test_configure_reprompts_on_invalid_timeout(tmp_path: Path) -> None:
+    """Non-numeric and non-positive timeouts re-prompt rather than crashing."""
+    config_path = tmp_path / 'config.toml'
+    original = Config()
+    inputs = _ScriptedInput(['', '', '', 'soon', '-5', '180', '', ''])
+    out = _Recording()
+    await ConfigureCommand(config=original, config_path=config_path).run('', inputs, out)
+    rendered = out.buffer.getvalue()
+    assert rendered.count('[invalid]') >= 2
+    written = load_config(config_path.read_text())
+    assert written.model.timeout_seconds == 180.0
 
 
 async def test_configure_reprompts_on_invalid_radius(tmp_path: Path) -> None:
     config_path = tmp_path / 'config.toml'
     original = Config()
-    inputs = _ScriptedInput(['', '', '', '', 'not-a-radius', 'read-only'])
+    inputs = _ScriptedInput(['', '', '', '', '', 'not-a-radius', 'read-only'])
     out = _Recording()
     await ConfigureCommand(config=original, config_path=config_path).run('', inputs, out)
     rendered = out.buffer.getvalue()
@@ -194,7 +209,7 @@ async def test_configure_reports_write_error(tmp_path: Path, monkeypatch: pytest
         raise PermissionError('denied')
 
     monkeypatch.setattr(Path, 'write_text', boom)
-    await ConfigureCommand(config=Config(), config_path=config_path).run('', _ScriptedInput(['', '', '', '', '']), out)
+    await ConfigureCommand(config=Config(), config_path=config_path).run('', _ScriptedInput(['', '', '', '', '', '']), out)
     assert 'could not write' in out.buffer.getvalue()
 
 

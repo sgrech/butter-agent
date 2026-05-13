@@ -95,6 +95,16 @@ class _UrllibTransport:
             )
             with urllib.request.urlopen(request, timeout=timeout) as response:
                 raw = response.read()
+        except TimeoutError as exc:
+            # `urlopen(timeout=...)` raises socket.timeout (aliased to
+            # TimeoutError in Python 3.10+), which is an OSError subclass and
+            # NOT a URLError. Without this branch it would escape the
+            # adapter's "uniform ModelProtocolError" promise and bubble up to
+            # cli._cmd_start as a fatal startup error, killing the REPL
+            # instead of letting the loop print the error and continue.
+            raise ModelProtocolError(
+                f'ollama request timed out after {timeout:.0f}s — the model may be cold-loading; increase [model] timeout_seconds in config.toml if this is the first call',
+            ) from exc
         except (urllib.error.URLError, ValueError) as exc:
             # Both Request(url=...) and urlopen() can raise ValueError for
             # unsupported / malformed URLs (e.g. missing scheme). Treat
