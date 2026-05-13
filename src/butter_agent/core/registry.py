@@ -75,7 +75,7 @@ class Capability:
 
 @dataclass(frozen=True, slots=True)
 class PluginManifest:
-    """Parsed and validated plugin.toml contents."""
+    """Parsed and validated manifest.toml contents."""
 
     name: str
     version: str
@@ -113,7 +113,7 @@ class RegistryError(Exception):
 
 
 class ManifestError(RegistryError):
-    """Raised when a plugin.toml fails to parse or validate."""
+    """Raised when a manifest.toml fails to parse or validate."""
 
 
 class BlastRadiusViolation(RegistryError):
@@ -140,10 +140,10 @@ class CapabilityNotFoundError(RegistryError):
 
 
 def parse_manifest(toml_text: str) -> PluginManifest:
-    """Parse a plugin.toml document and validate its shape.
+    """Parse a manifest.toml document and validate its shape.
 
     Args:
-        toml_text: Raw contents of a plugin.toml file.
+        toml_text: Raw contents of a manifest.toml file.
 
     Returns:
         A validated `PluginManifest`.
