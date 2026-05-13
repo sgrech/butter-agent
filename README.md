@@ -10,7 +10,18 @@ Full architecture and scope live in the `ai-butterbot` domain of `knowledgebase-
 
 ## Status
 
-Day-1 scaffolding. Nothing implemented yet.
+Day-1 in progress. Build order from `CLAUDE.md`:
+
+| # | Module | Status |
+|---|--------|--------|
+| 1 | `core/loop.py` — shape-fixed agent loop, Protocol seams | ✅ implemented |
+| 2 | `core/registry.py` — plugin manifest parsing, frozen registry, blast-radius gating | ✅ implemented |
+| 3 | `core/task_executor.py` — atomic plan validation, `$variable` resolution, gate enforcement | ⏳ next |
+| 4 | `core/context_manager.py` — small-context-footprint enforcer | ⏳ deferred |
+| 5 | `repl.py` — first-class REPL adapter | ⏳ deferred |
+| 6 | `config.toml` — default config and plugin source list | ⏳ deferred |
+
+No model adapter, no plugins, no entrypoint script wired yet.
 
 ## Development
 

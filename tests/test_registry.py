@@ -104,6 +104,30 @@ output_schema = {}
         parse_manifest(toml_text)
 
 
+def test_parse_manifest_rejects_duplicate_capability_names() -> None:
+    toml_text = """
+[plugin]
+name = "dupe"
+version = "0.1.0"
+blast_radius = "read-only"
+entrypoint = "main:Plugin"
+
+[[capability]]
+name = "do_thing"
+description = "first definition"
+input_schema = {}
+output_schema = {}
+
+[[capability]]
+name = "do_thing"
+description = "shadowing the first"
+input_schema = {}
+output_schema = {}
+"""
+    with pytest.raises(ManifestError, match="duplicate capability name 'do_thing'"):
+        parse_manifest(toml_text)
+
+
 def test_parse_manifest_rejects_invalid_toml() -> None:
     with pytest.raises(ManifestError, match='invalid TOML'):
         parse_manifest('not = valid = toml')

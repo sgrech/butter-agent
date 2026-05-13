@@ -174,6 +174,7 @@ def parse_manifest(toml_text: str) -> PluginManifest:
         raise ManifestError(f'plugin {name!r}: must declare at least one [[capability]]')
 
     capabilities = tuple(_parse_capability(name, raw_cap) for raw_cap in raw_caps)
+    _ensure_unique_capability_names(name, capabilities)
 
     return PluginManifest(
         name=name,
@@ -196,6 +197,14 @@ def _require_str(section: dict[str, object], path: str, key: str = 'name') -> st
     if not isinstance(value, str) or not value:
         raise ManifestError(f'missing or empty string: {path}')
     return value
+
+
+def _ensure_unique_capability_names(plugin_name: str, capabilities: tuple[Capability, ...]) -> None:
+    seen: set[str] = set()
+    for cap in capabilities:
+        if cap.name in seen:
+            raise ManifestError(f'plugin {plugin_name!r}: duplicate capability name {cap.name!r}')
+        seen.add(cap.name)
 
 
 def _parse_capability(plugin_name: str, raw: object) -> Capability:
