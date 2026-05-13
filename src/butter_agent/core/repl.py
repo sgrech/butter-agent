@@ -251,13 +251,16 @@ class Repl:
 
     async def _dispatch_command(self, line: str) -> bool:
         """Run a slash command. Returns `True` when the REPL should exit."""
-        # Split off the leading '/' and the first whitespace-bounded token.
-        name, _, args = line[1:].partition(' ')
-        command = self._commands.get(name)
+        # Split off the leading '/' and the first whitespace-bounded token —
+        # `str.split(maxsplit=1)` handles tabs and other whitespace, not just
+        # literal spaces.
+        head, *rest = line[1:].split(maxsplit=1)
+        args = rest[0] if rest else ''
+        command = self._commands.get(head)
         if command is None:
-            self._output.write(f'[error] unknown command: /{name}\n')
+            self._output.write(f'[error] unknown command: /{head}\n')
             return False
-        result = await command.run(args.lstrip(), self._input, self._output)
+        result = await command.run(args, self._input, self._output)
         return result.exit
 
     def _render(self, result: TurnResult) -> None:

@@ -122,7 +122,10 @@ async def test_status_prints_resolved_config() -> None:
     assert 'qwen3:8b' in rendered
     assert 'http://localhost:11434' in rendered
     assert '/tmp/butter.db' in rendered
-    assert 'plugins.registered = 3' in rendered
+    assert 'plugins.registered' in rendered
+    assert 'core.max_blast_radius' in rendered
+    # The legacy abbreviated label must not leak back in.
+    assert 'core.max_radius' not in rendered
 
 
 # --- /configure -------------------------------------------------------------
@@ -226,6 +229,29 @@ async def test_repl_falls_through_non_slash_to_model() -> None:
     )
     await repl.run()
     assert agent.calls == ['hello there']
+
+
+async def test_repl_dispatch_splits_on_any_whitespace() -> None:
+    """`/status\\t--verbose` and `/status --verbose` both route to `status`."""
+    out = _Recording()
+    captured: list[str] = []
+
+    class _Recorder:
+        name = 'status'
+        description = 'recorder'
+
+        async def run(self, args: str, io_in, output) -> CommandResult:  # type: ignore[no-untyped-def]
+            captured.append(args)
+            return CommandResult()
+
+    repl = Repl(
+        _StubAgentLoop(),
+        _ScriptedInput(['/status\t--verbose', '/status --verbose']),
+        out,
+        commands=CommandRegistry((_Recorder(),)),
+    )
+    await repl.run()
+    assert captured == ['--verbose', '--verbose']
 
 
 async def test_repl_unknown_command_renders_error() -> None:

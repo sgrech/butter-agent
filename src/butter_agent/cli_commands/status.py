@@ -25,11 +25,11 @@ class StatusCommand:
         del args, io_in
         cfg = self._config
         output.write('butter-agent status:\n')
-        output.write(f'  model.provider     = {cfg.model.provider}\n')
-        output.write(f'  model.model        = {cfg.model.model}\n')
-        output.write(f'  model.host         = {cfg.model.host}\n')
-        output.write(f'  storage.provider   = {cfg.storage.provider}\n')
-        output.write(f'  storage.path       = {cfg.storage.path}\n')
-        output.write(f'  core.max_radius    = {cfg.core.max_blast_radius.value}\n')
-        output.write(f'  plugins.registered = {self._plugin_count}\n')
+        output.write(f'  model.provider         = {cfg.model.provider}\n')
+        output.write(f'  model.model            = {cfg.model.model}\n')
+        output.write(f'  model.host             = {cfg.model.host}\n')
+        output.write(f'  storage.provider       = {cfg.storage.provider}\n')
+        output.write(f'  storage.path           = {cfg.storage.path}\n')
+        output.write(f'  core.max_blast_radius  = {cfg.core.max_blast_radius.value}\n')
+        output.write(f'  plugins.registered     = {self._plugin_count}\n')
         return CommandResult()
