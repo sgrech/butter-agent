@@ -138,6 +138,62 @@ def load_config(toml_text: str) -> Config:
     )
 
 
+# --- Writer ------------------------------------------------------------------
+
+
+def dump_config(config: Config) -> str:
+    """Serialize `config` back to TOML text.
+
+    The output round-trips through `load_config` — `load_config(dump_config(c)) == c`.
+    Used by the `/configure` slash command to persist edits without losing
+    sections (notably `[[plugin]]`) that the interactive walkthrough does
+    not touch.
+
+    Only the fields modelled by `Config` are emitted; commentary in the
+    shipped `config.toml` is intentionally not preserved.
+    """
+    lines: list[str] = []
+
+    lines.append('[core]')
+    lines.append(f'max_blast_radius = {_quote(config.core.max_blast_radius.value)}')
+    lines.append(f'network_allowlist = {_quote_list(config.core.network_allowlist)}')
+    lines.append('')
+
+    lines.append('[model]')
+    lines.append(f'provider = {_quote(config.model.provider)}')
+    lines.append(f'model = {_quote(config.model.model)}')
+    lines.append(f'host = {_quote(config.model.host)}')
+    lines.append('')
+
+    lines.append('[storage]')
+    lines.append(f'provider = {_quote(config.storage.provider)}')
+    lines.append(f'path = {_quote(config.storage.path)}')
+
+    for source in config.plugins:
+        lines.append('')
+        lines.append('[[plugin]]')
+        lines.append(f'source = {_quote(f"{source.repo}@{source.ref}")}')
+
+    return '\n'.join(lines) + '\n'
+
+
+def _quote(value: str) -> str:
+    """Render a string as a TOML basic string.
+
+    Escapes the subset that can appear in our config values (backslash,
+    double quote, control whitespace). Sufficient for paths, URLs, model
+    names, and blast-radius enum values — the only string fields we emit.
+    """
+    escaped = value.replace('\\', '\\\\').replace('"', '\\"').replace('\n', '\\n').replace('\r', '\\r').replace('\t', '\\t')
+    return f'"{escaped}"'
+
+
+def _quote_list(values: tuple[str, ...]) -> str:
+    if not values:
+        return '[]'
+    return '[' + ', '.join(_quote(v) for v in values) + ']'
+
+
 # --- Section parsers ---------------------------------------------------------
 
 

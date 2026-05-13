@@ -61,7 +61,7 @@ def _cmd_start(config_path: Path | None) -> int:
         return 2
 
     async def _run() -> None:
-        app = await build_repl(config)
+        app = await build_repl(config, config_path=target)
         try:
             await app.repl.run()
         finally:
@@ -82,7 +82,7 @@ def _cmd_start(config_path: Path | None) -> int:
 def _cmd_configure() -> int:
     path = resolve_config_path()
     sys.stdout.write(
-        f'Interactive configuration lands with the `/configure` slash command in a follow-up.\nFor now, edit this file directly (it is created on first save):\n  {path}\n',
+        f'Run `butter start` and use the `/configure` slash command to edit settings interactively.\nConfig file: {path}\n',
     )
     return 0
 

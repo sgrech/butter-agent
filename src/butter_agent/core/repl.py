@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import sys
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Protocol, TextIO
 
 from butter_agent.core.loop import (
@@ -95,6 +96,62 @@ class StdioOutput:
         self._stream.flush()
 
 
+# --- Slash command dispatch --------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class CommandResult:
+    """Outcome of running a slash command.
+
+    `exit=True` signals the REPL should stop accepting input after the
+    command completes — used by `/quit` and reserved for any future
+    command that needs to halt the loop without raising.
+    """
+
+    exit: bool = False
+
+
+class Command(Protocol):
+    """A slash command available from the REPL.
+
+    Commands are looked up by `name` (no leading slash). `description` is
+    surfaced by `/help`. `run` receives the trailing args string (already
+    stripped of the command token) plus IO seams so commands can prompt
+    interactively when needed.
+    """
+
+    name: str
+    description: str
+
+    async def run(self, args: str, io_in: InputSource, output: Output) -> CommandResult: ...
+
+
+class CommandRegistry:
+    """Lookup table of slash commands, frozen at construction time.
+
+    The dispatcher itself lives in `Repl.run`; this class is the
+    immutable lookup table the loop consults. Duplicate names raise at
+    construction so the registry never silently masks one binding with
+    another.
+    """
+
+    def __init__(self, commands: tuple[Command, ...]) -> None:
+        entries: dict[str, Command] = {}
+        for command in commands:
+            if command.name in entries:
+                raise ValueError(f'duplicate slash command: {command.name!r}')
+            entries[command.name] = command
+        self._entries = entries
+
+    def get(self, name: str) -> Command | None:
+        """Look up a command by name (no leading slash). Returns `None` if absent."""
+        return self._entries.get(name)
+
+    def all(self) -> tuple[Command, ...]:
+        """Return all registered commands in registration order."""
+        return tuple(self._entries.values())
+
+
 # --- Gate handler ------------------------------------------------------------
 
 
@@ -160,12 +217,14 @@ class Repl:
         *,
         prompt: str = '> ',
         banner: str = 'butter-agent. Ready.\n',
+        commands: CommandRegistry | None = None,
     ) -> None:
         self._loop = loop
         self._input = input_source
         self._output = output
         self._prompt = prompt
         self._banner = banner
+        self._commands = commands if commands is not None else CommandRegistry(())
 
     async def run(self) -> None:
         """Drive the read-print loop until EOF on input."""
@@ -179,12 +238,27 @@ class Repl:
             user_input = line.strip()
             if not user_input:
                 continue
+            if user_input.startswith('/'):
+                if await self._dispatch_command(user_input):
+                    return
+                continue
             try:
                 result = await self._loop.run_turn(user_input)
             except ModelProtocolError as exc:
                 self._output.write(f'[error] model adapter: {exc}\n')
                 continue
             self._render(result)
+
+    async def _dispatch_command(self, line: str) -> bool:
+        """Run a slash command. Returns `True` when the REPL should exit."""
+        # Split off the leading '/' and the first whitespace-bounded token.
+        name, _, args = line[1:].partition(' ')
+        command = self._commands.get(name)
+        if command is None:
+            self._output.write(f'[error] unknown command: /{name}\n')
+            return False
+        result = await command.run(args.lstrip(), self._input, self._output)
+        return result.exit
 
     def _render(self, result: TurnResult) -> None:
         if result.reply is not None:
