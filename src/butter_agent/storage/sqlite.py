@@ -65,8 +65,8 @@ class Database:
         """Run a DDL statement (CREATE TABLE / INDEX). Idempotent by convention.
 
         Consumers call this once at bootstrap to ensure their table
-        exists. DDL is serialised behind the writer lock so two
-        consumers bootstrapping in parallel don't race.
+        exists. Serialised behind the lock so two consumers
+        bootstrapping in parallel don't race.
         """
         async with self._lock:
             await asyncio.to_thread(self._execute_sync, sql, ())
@@ -79,14 +79,27 @@ class Database:
     async def fetchall(self, sql: str, params: tuple[object, ...]) -> list[tuple[object, ...]]:
         """Run a read statement and return all rows.
 
-        Reads do not take the writer lock — SQLite handles reader/writer
-        concurrency itself, and not blocking reads on long writes is
-        cheap insurance against a wedged context manager.
+        Reads take the same lock as writes. With `check_same_thread=False`
+        the sqlite3 docs require the caller to serialise all access to
+        the connection — otherwise an overlapping reader/writer pair
+        can hit `ProgrammingError` or `OperationalError` intermittently.
+        The lock is local to one async task at a time anyway, so the
+        cost is negligible at our single-user scale.
         """
-        return await asyncio.to_thread(self._fetchall_sync, sql, params)
+        async with self._lock:
+            return await asyncio.to_thread(self._fetchall_sync, sql, params)
 
     async def close(self) -> None:
-        await asyncio.to_thread(self._connection.close)
+        """Close the underlying connection.
+
+        Acquires the lock so any in-flight `execute` / `fetchall`
+        completes before the connection is torn down — otherwise the
+        in-flight thread could surface `sqlite3.ProgrammingError:
+        Cannot operate on a closed database`. Idempotent: closing twice
+        is harmless because `Connection.close()` itself is.
+        """
+        async with self._lock:
+            await asyncio.to_thread(self._connection.close)
 
     def _execute_sync(self, sql: str, params: tuple[object, ...]) -> None:
         with self._connection:

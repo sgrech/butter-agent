@@ -15,6 +15,7 @@ The storage module owns persistence behind seams declared in
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncIterator
 from pathlib import Path
 
 import pytest
@@ -31,9 +32,14 @@ def _entry(turn_id: str, *, user: str = 'hello', reply: str | None = 'hi', ts: f
 
 
 @pytest.fixture
-async def db(tmp_path: Path) -> Database:
+async def db(tmp_path: Path) -> AsyncIterator[Database]:
     database = await Database.open(tmp_path / 'butter.db')
-    return database
+    try:
+        yield database
+    finally:
+        # Close on teardown so SQLite releases the file handle before
+        # tmp_path cleanup runs (matters on Windows + WAL aux files).
+        await database.close()
 
 
 # --- Database lifecycle -----------------------------------------------------
@@ -42,9 +48,12 @@ async def db(tmp_path: Path) -> Database:
 async def test_database_creates_parent_directory(tmp_path: Path) -> None:
     nested = tmp_path / 'deep' / 'nested' / 'butter.db'
     assert not nested.parent.exists()
-    await Database.open(nested)
-    assert nested.parent.exists()
-    assert nested.exists()
+    database = await Database.open(nested)
+    try:
+        assert nested.parent.exists()
+        assert nested.exists()
+    finally:
+        await database.close()
 
 
 async def test_database_expands_home_directory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -70,13 +79,18 @@ async def test_database_idempotent_ddl(db: Database) -> None:
 async def test_database_reopen_sees_prior_writes(tmp_path: Path) -> None:
     path = tmp_path / 'butter.db'
     first = await Database.open(path)
-    await first.execute_ddl('CREATE TABLE t (v TEXT)')
-    await first.execute('INSERT INTO t VALUES (?)', ('persisted',))
-    await first.close()
+    try:
+        await first.execute_ddl('CREATE TABLE t (v TEXT)')
+        await first.execute('INSERT INTO t VALUES (?)', ('persisted',))
+    finally:
+        await first.close()
 
     second = await Database.open(path)
-    rows = await second.fetchall('SELECT v FROM t', ())
-    assert rows == [('persisted',)]
+    try:
+        rows = await second.fetchall('SELECT v FROM t', ())
+        assert rows == [('persisted',)]
+    finally:
+        await second.close()
 
 
 # --- SqliteConversationHistory ----------------------------------------------
@@ -126,15 +140,20 @@ async def test_history_preserves_null_assistant_reply(db: Database) -> None:
 async def test_history_persists_across_reopen(tmp_path: Path) -> None:
     path = tmp_path / 'butter.db'
     first_db = await Database.open(path)
-    first_history = await SqliteConversationHistory.create(first_db)
-    await first_history.append(_entry('t1', user='hi'))
-    await first_db.close()
+    try:
+        first_history = await SqliteConversationHistory.create(first_db)
+        await first_history.append(_entry('t1', user='hi'))
+    finally:
+        await first_db.close()
 
     second_db = await Database.open(path)
-    second_history = await SqliteConversationHistory.create(second_db)
-    (got,) = await second_history.recent(10)
-    assert got.turn_id == 't1'
-    assert got.user_input == 'hi'
+    try:
+        second_history = await SqliteConversationHistory.create(second_db)
+        (got,) = await second_history.recent(10)
+        assert got.turn_id == 't1'
+        assert got.user_input == 'hi'
+    finally:
+        await second_db.close()
 
 
 async def test_history_create_is_idempotent(db: Database) -> None:
@@ -144,6 +163,18 @@ async def test_history_create_is_idempotent(db: Database) -> None:
     await first.append(_entry('t1'))
     second = await SqliteConversationHistory.create(db)
     assert await second.recent(10) == (_entry('t1'),)
+
+
+async def test_database_close_waits_for_in_flight_ops(tmp_path: Path) -> None:
+    # close() acquires the writer lock — so any in-flight execute/fetchall
+    # completes before the connection is torn down. Without the fix, the
+    # in-flight thread can hit 'Cannot operate on a closed database'.
+    database = await Database.open(tmp_path / 'butter.db')
+    await database.execute_ddl('CREATE TABLE t (v INTEGER)')
+    # Launch writes and a close in the same scheduling tick; the lock
+    # decides who goes first but neither should crash.
+    writes = [database.execute('INSERT INTO t VALUES (?)', (i,)) for i in range(10)]
+    await asyncio.gather(*writes, database.close())
 
 
 async def test_history_concurrent_appends_all_land(db: Database) -> None:
