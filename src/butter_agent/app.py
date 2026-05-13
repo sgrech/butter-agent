@@ -17,6 +17,7 @@ documented in-code defaults — an empty TOML document is valid by design
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass
 from pathlib import Path
 
 from butter_agent.core.config import Config, load_config
@@ -37,7 +38,8 @@ def resolve_config_path() -> Path:
     Honours `$XDG_CONFIG_HOME` when set; otherwise defaults to
     `~/.config/butter-agent/config.toml`.
     """
-    xdg = os.environ.get('XDG_CONFIG_HOME')
+    # Per the XDG Base Directory spec, an empty value is treated as unset.
+    xdg = os.environ.get('XDG_CONFIG_HOME') or None
     base = Path(xdg).expanduser() if xdg else Path.home() / '.config'
     return base / 'butter-agent' / 'config.toml'
 
@@ -57,13 +59,30 @@ def load_or_default_config(path: Path | None = None) -> Config:
 # --- Composition -------------------------------------------------------------
 
 
+@dataclass(frozen=True, slots=True)
+class App:
+    """Composed application handle — a `Repl` plus the lifecycle resources it owns.
+
+    Returned from `build_repl` so callers can close the underlying SQLite
+    connection deterministically after the REPL exits rather than relying
+    on interpreter-shutdown GC ordering.
+    """
+
+    repl: Repl
+    database: Database
+
+    async def close(self) -> None:
+        """Idempotently close owned resources."""
+        await self.database.close()
+
+
 async def build_repl(
     config: Config,
     *,
     input_source: InputSource | None = None,
     output: Output | None = None,
-) -> Repl:
-    """Compose a runnable `Repl` from a validated `Config`.
+) -> App:
+    """Compose a runnable `App` (Repl + database handle) from a validated `Config`.
 
     Empty registry by design (v1) — `[[plugin]]` source-fetch lands in a
     later scope. The model still receives an (empty) capabilities list,
@@ -85,7 +104,8 @@ async def build_repl(
     executor = DefaultTaskExecutor(registry, gate_handler)
     loop = AgentLoop(context_manager, model, executor)
 
-    return Repl(loop, io_in, io_out, banner=_format_banner(config))
+    repl = Repl(loop, io_in, io_out, banner=_format_banner(config))
+    return App(repl=repl, database=database)
 
 
 def _format_banner(config: Config) -> str:

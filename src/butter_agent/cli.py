@@ -9,15 +9,17 @@ Two subcommands today:
 
 The CLI is intentionally thin: composition lives in `app.build_repl`, so
 this module only handles argument parsing, top-level error rendering,
-and the `asyncio.run` boundary.
+deterministic resource cleanup, and the `asyncio.run` boundary.
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import sqlite3
 import sys
 from collections.abc import Sequence
+from pathlib import Path
 
 from butter_agent import __version__
 from butter_agent.app import build_repl, load_or_default_config, resolve_config_path
@@ -30,7 +32,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument('--version', action='version', version=f'butter-agent {__version__}')
 
     subparsers = parser.add_subparsers(dest='command', metavar='{start,configure}')
-    subparsers.add_parser('start', help='Start the interactive REPL (default).')
+
+    start = subparsers.add_parser('start', help='Start the interactive REPL (default).')
+    start.add_argument('--config', '-c', type=Path, default=None, help='Path to config.toml (overrides the XDG-resolved default).')
+
     subparsers.add_parser('configure', help='Configure butter-agent (interactive flow lands in a follow-up; today this prints the config path).')
     return parser
 
@@ -43,21 +48,34 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if command == 'configure':
         return _cmd_configure()
-    return _cmd_start()
+    config_override: Path | None = getattr(args, 'config', None)
+    return _cmd_start(config_override)
 
 
-def _cmd_start() -> int:
+def _cmd_start(config_path: Path | None) -> int:
+    target = config_path if config_path is not None else resolve_config_path()
     try:
-        config = load_or_default_config(resolve_config_path())
+        config = load_or_default_config(target)
     except ConfigError as exc:
         sys.stderr.write(f'[error] config: {exc}\n')
         return 2
 
     async def _run() -> None:
-        repl = await build_repl(config)
-        await repl.run()
+        app = await build_repl(config)
+        try:
+            await app.repl.run()
+        finally:
+            await app.close()
 
-    asyncio.run(_run())
+    try:
+        asyncio.run(_run())
+    except (OSError, sqlite3.Error) as exc:
+        # First-run install paths can hit PermissionError on mkdir, ENOSPC on
+        # the SQLite write, or a corrupted DB at `storage.path`. Surface those
+        # through the same friendly channel as ConfigError instead of dumping
+        # a raw traceback.
+        sys.stderr.write(f'[error] startup: {exc}\n')
+        return 2
     return 0
 
 

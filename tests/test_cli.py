@@ -7,6 +7,7 @@ error path when config loading fails.
 
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 from typing import Any
 
@@ -44,20 +45,69 @@ def test_main_start_runs_repl_with_loaded_config(monkeypatch: pytest.MonkeyPatch
     config_path.write_text('[model]\nmodel = "qwen3:4b"\n')
     monkeypatch.setattr(cli, 'resolve_config_path', lambda: config_path)
 
-    captured: dict[str, Config | bool] = {'ran': False}
+    captured: dict[str, Any] = {'ran': False, 'closed': False}
 
-    async def fake_build_repl(config: Config, **_: object) -> _RecordingRepl:
+    async def fake_build_repl(config: Config, **_: object) -> _RecordingApp:
         captured['config'] = config
-        return _RecordingRepl(captured)
+        return _RecordingApp(captured)
 
     monkeypatch.setattr(cli, 'build_repl', fake_build_repl)
     exit_code = cli.main(['start'])
 
     assert exit_code == 0
     assert captured['ran'] is True
+    assert captured['closed'] is True
     cfg = captured['config']
     assert isinstance(cfg, Config)
     assert cfg.model.model == 'qwen3:4b'
+
+
+def test_main_start_honours_explicit_config_flag(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    flag_path = tmp_path / 'override.toml'
+    flag_path.write_text('[model]\nmodel = "qwen3:override"\n')
+
+    def _unexpected() -> Path:  # pragma: no cover - guard
+        raise AssertionError('resolve_config_path should not be called when --config is given')
+
+    monkeypatch.setattr(cli, 'resolve_config_path', _unexpected)
+
+    captured: dict[str, Any] = {'ran': False, 'closed': False}
+
+    async def fake_build_repl(config: Config, **_: object) -> _RecordingApp:
+        captured['config'] = config
+        return _RecordingApp(captured)
+
+    monkeypatch.setattr(cli, 'build_repl', fake_build_repl)
+    assert cli.main(['start', '--config', str(flag_path)]) == 0
+    cfg = captured['config']
+    assert isinstance(cfg, Config)
+    assert cfg.model.model == 'qwen3:override'
+
+
+def test_main_start_renders_oserror_as_friendly_diagnostic(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    monkeypatch.setattr(cli, 'resolve_config_path', lambda: tmp_path / 'missing.toml')
+
+    async def fake_build_repl(_config: Config, **_: object) -> _RecordingApp:
+        raise PermissionError('cannot create storage dir')
+
+    monkeypatch.setattr(cli, 'build_repl', fake_build_repl)
+    exit_code = cli.main(['start'])
+    captured = capsys.readouterr()
+    assert exit_code == 2
+    assert 'cannot create storage dir' in captured.err
+
+
+def test_main_start_renders_sqlite_error_as_friendly_diagnostic(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    monkeypatch.setattr(cli, 'resolve_config_path', lambda: tmp_path / 'missing.toml')
+
+    async def fake_build_repl(_config: Config, **_: object) -> _RecordingApp:
+        raise sqlite3.OperationalError('database file is corrupted')
+
+    monkeypatch.setattr(cli, 'build_repl', fake_build_repl)
+    exit_code = cli.main(['start'])
+    captured = capsys.readouterr()
+    assert exit_code == 2
+    assert 'database file is corrupted' in captured.err
 
 
 def test_main_start_returns_error_code_on_bad_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -75,14 +125,26 @@ def test_main_start_returns_error_code_on_bad_config(monkeypatch: pytest.MonkeyP
 def test_main_no_args_defaults_to_start(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setattr(cli, 'resolve_config_path', lambda: tmp_path / 'missing.toml')
 
-    captured: dict[str, Any] = {'ran': False}
+    captured: dict[str, Any] = {'ran': False, 'closed': False}
 
-    async def fake_build_repl(config: Config, **_: object) -> _RecordingRepl:
-        return _RecordingRepl(captured)
+    async def fake_build_repl(config: Config, **_: object) -> _RecordingApp:
+        return _RecordingApp(captured)
 
     monkeypatch.setattr(cli, 'build_repl', fake_build_repl)
     assert cli.main([]) == 0
     assert captured['ran'] is True
+    assert captured['closed'] is True
+
+
+class _RecordingApp:
+    """Stand-in for `app.App` — tracks `repl.run()` and `close()` invocations."""
+
+    def __init__(self, captured: dict[str, Any]) -> None:
+        self._captured = captured
+        self.repl = _RecordingRepl(captured)
+
+    async def close(self) -> None:
+        self._captured['closed'] = True
 
 
 class _RecordingRepl:

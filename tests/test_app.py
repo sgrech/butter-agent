@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from butter_agent.app import build_repl, load_or_default_config, resolve_config_path
+from butter_agent.app import App, build_repl, load_or_default_config, resolve_config_path
 from butter_agent.core.config import Config, ConfigError, ModelConfig, StorageConfig, load_config
 from butter_agent.core.repl import Repl, StdioInputSource
 
@@ -30,6 +30,12 @@ def test_resolve_config_path_uses_xdg_config_home(monkeypatch: pytest.MonkeyPatc
 
 def test_resolve_config_path_falls_back_to_home_dotconfig(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.delenv('XDG_CONFIG_HOME', raising=False)
+    monkeypatch.setattr(Path, 'home', classmethod(lambda _cls: tmp_path))
+    assert resolve_config_path() == tmp_path / '.config' / 'butter-agent' / 'config.toml'
+
+
+def test_resolve_config_path_treats_empty_xdg_as_unset(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv('XDG_CONFIG_HOME', '')
     monkeypatch.setattr(Path, 'home', classmethod(lambda _cls: tmp_path))
     assert resolve_config_path() == tmp_path / '.config' / 'butter-agent' / 'config.toml'
 
@@ -53,7 +59,7 @@ def test_load_or_default_config_propagates_config_error(tmp_path: Path) -> None:
         load_or_default_config(path)
 
 
-async def test_build_repl_returns_wired_repl(tmp_path: Path) -> None:
+async def test_build_repl_returns_wired_app(tmp_path: Path) -> None:
     db_path = tmp_path / 'butter.db'
     config = Config(
         model=ModelConfig(model='qwen3:8b', host='http://localhost:11434'),
@@ -61,17 +67,26 @@ async def test_build_repl_returns_wired_repl(tmp_path: Path) -> None:
     )
     in_buf = io.StringIO('')
     out_buf = io.StringIO()
-    repl = await build_repl(
+    app = await build_repl(
         config,
         input_source=StdioInputSource(in_buf, prompt_stream=out_buf),
         output=_RecordingOutput(out_buf),
     )
-    assert isinstance(repl, Repl)
+    assert isinstance(app, App)
+    assert isinstance(app.repl, Repl)
     # The Repl runs to EOF immediately on empty input, exercising the wiring.
-    await repl.run()
+    await app.repl.run()
     assert 'butter-agent' in out_buf.getvalue()
     assert str(db_path) in out_buf.getvalue()
     assert db_path.exists()
+    await app.close()
+
+
+async def test_app_close_is_idempotent(tmp_path: Path) -> None:
+    config = Config(storage=StorageConfig(path=str(tmp_path / 'butter.db')))
+    app = await build_repl(config)
+    await app.close()
+    await app.close()  # second close must not raise
 
 
 class _RecordingOutput:
