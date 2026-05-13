@@ -8,8 +8,8 @@ license = { text = 'MIT' }
 authors = [{ name = 'Shane Grech' }]
 dependencies = []
 
-# `[project.scripts]` for the `butter` CLI is intentionally deferred until
-# `repl.py` lands (build order #5) — see CLAUDE.md.
+[project.scripts]
+butter = 'butter_agent.cli:main'
 
 [dependency-groups]
 dev = [
