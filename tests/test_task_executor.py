@@ -424,6 +424,48 @@ async def test_network_plugin_with_human_gate_keeps_human_gate() -> None:
     assert handler.seen == [(1, Gate.HUMAN)]
 
 
+async def test_gate_handler_receives_read_only_snapshot_of_prior_outputs() -> None:
+    @dataclass
+    class _MutatingHandler:
+        captured: list[Mapping[str, Mapping[str, object]]] = field(default_factory=list)
+        mutation_errors: list[type[BaseException]] = field(default_factory=list)
+
+        async def on_gate(
+            self,
+            step: PlanStep,
+            effective_gate: Gate,
+            prior_outputs: Mapping[str, Mapping[str, object]],
+        ) -> GateDecision:
+            self.captured.append(prior_outputs)
+            try:
+                prior_outputs['first']['k'] = 99  # type: ignore[index]
+            except TypeError as exc:
+                self.mutation_errors.append(type(exc))
+            return GateDecision.CONTINUE
+
+    plugin_a = _RecordingPlugin(responses={'do': {'k': 1}})
+    plugin_b = _RecordingPlugin(responses={'do': {}})
+    handler = _MutatingHandler()
+    executor = _make_executor(
+        (_manifest('a', capabilities=(_cap('do'),)), plugin_a),
+        (_manifest('b', capabilities=(_cap('do'),)), plugin_b),
+        gate_handler=handler,
+    )
+
+    plan = TaskPlan(
+        steps=(
+            PlanStep(step=1, plugin='a', capability='do', inputs={}, gate='none', outputs_as='first'),
+            PlanStep(step=2, plugin='b', capability='do', inputs={}, gate='confirm'),
+        )
+    )
+
+    result = await executor.execute(plan)
+
+    assert handler.mutation_errors == [TypeError]
+    # The real output pool is untouched — the handler only ever saw a proxy.
+    assert result.outputs == {'first': {'k': 1}}
+
+
 async def test_non_network_plugin_keeps_declared_none_gate() -> None:
     plugin = _RecordingPlugin(responses={'do': {}})
     handler = _RecordingGateHandler(decisions=[])

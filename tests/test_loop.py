@@ -85,7 +85,7 @@ async def test_task_plan_routes_to_executor() -> None:
     plan = TaskPlan(
         steps=(PlanStep(step=1, plugin='notes', capability='create', inputs={'body': 'x'}, gate='none'),),
     )
-    expected_result = ExecutionResult(plan=plan, outputs={'note_id': 42})
+    expected_result = ExecutionResult(plan=plan, outputs={'note': {'id': 42}})
     loop, _, _, executor = _wire(plan, executor_result=expected_result)
 
     result = await loop.run_turn('save a note')

@@ -28,6 +28,7 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
+from types import MappingProxyType
 from typing import Protocol
 
 from butter_agent.core.loop import ExecutionResult, PlanStep, TaskPlan
@@ -44,8 +45,11 @@ from butter_agent.core.registry import (
 class Gate(StrEnum):
     """Gate types a plan step may declare.
 
-    `NONE` runs the step immediately. `CONFIRM` pauses for a yes/no decision.
-    `HUMAN` pauses to present prior results and wait for free-form input.
+    `NONE` runs the step immediately. `CONFIRM` pauses for an explicit yes/no
+    approval before running the step. `HUMAN` pauses to present prior step
+    outputs to the operator and waits for an approve-or-abort decision (it
+    does not yet round-trip free-form input back into the plan — that would
+    require extending the gate API).
     """
 
     NONE = 'none'
@@ -119,6 +123,16 @@ def _parse_ref(value: object) -> _VarRef | None:
     return _VarRef(alias=match.group(1), field=match.group(2))
 
 
+def _freeze_outputs(outputs: Mapping[str, Mapping[str, object]]) -> Mapping[str, Mapping[str, object]]:
+    """Return a read-only snapshot of the executor's output pool.
+
+    Wraps each inner dict in a MappingProxyType so a misbehaving gate handler
+    cannot mutate prior step outputs and corrupt variable resolution for
+    later steps. The outer mapping is also a proxy.
+    """
+    return MappingProxyType({alias: MappingProxyType(dict(value)) for alias, value in outputs.items()})
+
+
 # --- Executor ---------------------------------------------------------------
 
 
@@ -156,7 +170,8 @@ class DefaultTaskExecutor:
             effective_gate = self._effective_gate(step)
 
             if effective_gate is not Gate.NONE:
-                decision = await self._gate_handler.on_gate(step, effective_gate, outputs)
+                snapshot = _freeze_outputs(outputs)
+                decision = await self._gate_handler.on_gate(step, effective_gate, snapshot)
                 if decision is GateDecision.ABORT:
                     return ExecutionResult(
                         plan=plan,
@@ -230,7 +245,7 @@ class DefaultTaskExecutor:
                 continue
             if ref.alias not in declared_aliases:
                 raise PlanValidationError(
-                    f'step {step.step}: input {key!r} references unknown alias ${ref.alias!r} (no prior step declared this outputs_as)',
+                    f'step {step.step}: input {key!r} references unknown alias ${ref.alias} (no prior step declared this outputs_as)',
                 )
 
     # --- Variable resolution (invariant #4) ---------------------------------
@@ -250,13 +265,13 @@ class DefaultTaskExecutor:
                 alias_outputs = outputs[ref.alias]
             except KeyError as exc:
                 raise VariableResolutionError(
-                    f'step {step.step}: input {key!r} references ${ref.alias}.{ref.field} but alias {ref.alias!r} has no recorded output',
+                    f'step {step.step}: input {key!r} references ${ref.alias}.{ref.field} but alias ${ref.alias} has no recorded output',
                 ) from exc
             try:
                 resolved[key] = alias_outputs[ref.field]
             except KeyError as exc:
                 raise VariableResolutionError(
-                    f'step {step.step}: input {key!r} references ${ref.alias}.{ref.field} but field {ref.field!r} is not in output of alias {ref.alias!r}',
+                    f'step {step.step}: input {key!r} references ${ref.alias}.{ref.field} but field {ref.field!r} is not in output of alias ${ref.alias}',
                 ) from exc
         return resolved
 
