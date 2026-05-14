@@ -59,7 +59,13 @@ def test_minimal_plugin_can_be_declared_via_public_api_only() -> None:
     """
 
     class MinimalPlugin:
-        async def execute(self, capability: str, inputs: dict[str, object]) -> dict[str, object]:
+        async def execute(
+            self,
+            capability: str,
+            inputs: dict[str, object],
+            context: plugin_api.PluginContext,
+        ) -> dict[str, object]:
+            del inputs, context
             return {'echo': capability}
 
     # The Protocol is structural — implementing `execute` is enough.

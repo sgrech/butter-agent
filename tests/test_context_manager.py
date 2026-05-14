@@ -35,7 +35,13 @@ from butter_agent.core.registry import (
 
 
 class _StubPlugin:
-    async def execute(self, capability: str, inputs: dict[str, object]) -> dict[str, object]:
+    async def execute(
+        self,
+        capability: str,
+        inputs: dict[str, object],
+        context: object,
+    ) -> dict[str, object]:
+        del capability, inputs, context
         return {}
 
 
@@ -112,6 +118,57 @@ class _RecordingMemory:
 
 
 # --- DefaultContextManager.assemble -----------------------------------------
+
+
+async def test_assemble_skips_internal_capabilities_in_descriptor_list() -> None:
+    """Internal capabilities are infrastructure, not planner-visible.
+
+    Surfacing them to the model would spend tokens advertising plans the
+    executor must then reject — and would confuse the model about which
+    capabilities are actually available.
+    """
+    builder = RegistryBuilder(max_blast_radius=BlastRadius.NETWORK)
+    infra_toml = """
+[plugin]
+name = "infra"
+version = "0.1.0"
+blast_radius = "local-write"
+entrypoint = "main:Plugin"
+
+[[capability]]
+name = "store"
+description = "Internal store"
+input_schema = {}
+output_schema = {}
+internal = true
+
+[[capability]]
+name = "stats"
+description = "Public stats"
+input_schema = {}
+output_schema = {}
+"""
+    builder.register(parse_manifest(infra_toml), _StubPlugin())
+    registry = builder.build()
+
+    seen: list[tuple[CapabilityDescriptor, ...]] = []
+
+    class _Recorder:
+        def select(
+            self,
+            turn: Turn,
+            available: tuple[CapabilityDescriptor, ...],
+        ) -> tuple[CapabilityDescriptor, ...]:
+            del turn
+            seen.append(available)
+            return available
+
+    cm = DefaultContextManager(registry, InMemoryConversationHistory(), capability_filter=_Recorder())
+    await cm.assemble(_turn('hi'))
+
+    (available,) = seen
+    names = {desc.capability for desc in available}
+    assert names == {'stats'}, 'internal capabilities must not be surfaced to the planner'
 
 
 async def test_assemble_surfaces_all_capability_descriptors_when_filter_returns_all() -> None:

@@ -7,6 +7,9 @@ this module is the stability contract.
 What's re-exported:
 
 - `Plugin` — the single-entrypoint Protocol every plugin satisfies.
+- `PluginContext` — the per-invocation handle the executor injects into
+  `Plugin.execute`. Plugins use it to invoke `internal` capabilities they
+  declared in their manifest `requires`.
 - `BlastRadius` — the radius tiers a plugin may declare in its manifest.
 - `Capability`, `PluginManifest` — value types for plugins that want to
   parse or inspect their own manifest at test time.
@@ -42,6 +45,7 @@ from butter_agent.core.registry import (
     CapabilityNotFoundError,
     ManifestError,
     Plugin,
+    PluginContext,
     PluginManifest,
     parse_manifest,
 )
@@ -58,6 +62,7 @@ __all__ = [
     'CapabilityNotFoundError',
     'ManifestError',
     'Plugin',
+    'PluginContext',
     'PluginManifest',
     'parse_manifest',
 ]
