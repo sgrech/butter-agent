@@ -43,6 +43,8 @@ from prompt_toolkit.completion import CompleteEvent, Completer, Completion
 from prompt_toolkit.document import Document
 from prompt_toolkit.history import FileHistory
 
+from butter_agent.core.repl import register_active_indicator, unregister_active_indicator
+
 # --- Slash-command completion -----------------------------------------------
 
 
@@ -151,6 +153,8 @@ class InferenceIndicator:
         self._stream: TextIO = stream if stream is not None else sys.stderr
         self._interval = interval
         self._task: asyncio.Task[None] | None = None
+        self._paused = False
+        self._token: object | None = None
         # Decided once at construction so unit tests that swap streams
         # behave deterministically — re-checking on enter would let a
         # late TTY change racily enable the spinner mid-turn.
@@ -158,6 +162,12 @@ class InferenceIndicator:
 
     async def __aenter__(self) -> InferenceIndicator:
         if self._enabled:
+            # Register before starting the animator so any code that
+            # observes the ContextVar (gate handler, future progress
+            # plugins) sees a paused-when-needed handle for the full
+            # lifetime of the spinner.
+            self._token = register_active_indicator(self)
+            self._paused = False
             self._task = asyncio.create_task(self._animate())
         return self
 
@@ -167,6 +177,9 @@ class InferenceIndicator:
         exc: BaseException | None,
         tb: TracebackType | None,
     ) -> None:
+        if self._token is not None:
+            unregister_active_indicator(self._token)
+            self._token = None
         if self._task is None:
             return
         self._task.cancel()
@@ -178,11 +191,33 @@ class InferenceIndicator:
         self._stream.write(_CLEAR_LINE)
         self._stream.flush()
 
+    def pause(self) -> None:
+        """Stop drawing frames and clear the current line.
+
+        Used by `core.repl.suspend_indicator()` when something else
+        takes over the terminal — typically a `confirm`/`human` gate
+        prompt that blocks on operator input. The animator task keeps
+        running but emits nothing while `_paused` is set; `resume()`
+        re-enables frame writes.
+        """
+        if not self._enabled:
+            return
+        self._paused = True
+        self._stream.write(_CLEAR_LINE)
+        self._stream.flush()
+
+    def resume(self) -> None:
+        """Counterpart to `pause()` — start emitting frames again."""
+        if not self._enabled:
+            return
+        self._paused = False
+
     async def _animate(self) -> None:
         idx = 0
         while True:
-            frame = _SPINNER_FRAMES[idx % len(_SPINNER_FRAMES)]
-            self._stream.write(f'{_CLEAR_LINE}{frame} {self._message}...')
-            self._stream.flush()
+            if not self._paused:
+                frame = _SPINNER_FRAMES[idx % len(_SPINNER_FRAMES)]
+                self._stream.write(f'{_CLEAR_LINE}{frame} {self._message}...')
+                self._stream.flush()
             await asyncio.sleep(self._interval)
             idx += 1

@@ -278,6 +278,42 @@ async def test_repl_writes_banner_before_first_prompt() -> None:
     assert out.chunks[0] == 'hello\n'
 
 
+async def test_gate_handler_pauses_and_resumes_active_indicator() -> None:
+    """PR #18 review (Copilot): the spinner kept animating during gate prompts.
+
+    Fix: `ReplGateHandler.on_gate` wraps its prompt in
+    `suspend_indicator()`, which pauses any registered
+    `IndicatorControl` for the duration. This test registers a
+    recording indicator via the same contextvar API used by
+    `InferenceIndicator` and asserts pause/resume fire exactly once
+    around the gate interaction.
+    """
+    from butter_agent.core.repl import register_active_indicator, unregister_active_indicator
+
+    @dataclass
+    class _RecordingIndicator:
+        pauses: int = 0
+        resumes: int = 0
+
+        def pause(self) -> None:
+            self.pauses += 1
+
+        def resume(self) -> None:
+            self.resumes += 1
+
+    indicator = _RecordingIndicator()
+    token = register_active_indicator(indicator)
+    try:
+        inp = _ScriptedInput(lines=deque(['y']))
+        out = _CapturingOutput()
+        await ReplGateHandler(inp, out).on_gate(_step(), Gate.CONFIRM, {})
+    finally:
+        unregister_active_indicator(token)
+
+    assert indicator.pauses == 1
+    assert indicator.resumes == 1
+
+
 # --- ReplGateHandler ---------------------------------------------------------
 
 

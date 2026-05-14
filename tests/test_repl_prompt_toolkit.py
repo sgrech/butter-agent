@@ -98,6 +98,78 @@ async def test_indicator_does_not_emit_when_awaited_returns_immediately() -> Non
     assert stream.getvalue().endswith('\r\x1b[K')
 
 
+async def test_indicator_pause_stops_frame_emission_and_clears_line() -> None:
+    """While paused, the animator must not write spinner frames.
+
+    PR #18 review (Copilot): the spinner kept animating during
+    `confirm`/`human` gate prompts because the indicator wraps the
+    entire `run_turn`. `pause()` is the suspension hook the gate
+    handler calls via `suspend_indicator()`.
+    """
+    stream = _FakeTTYStream()
+    async with InferenceIndicator(message='thinking', stream=stream, interval=0.01) as indicator:
+        # Let one or two frames render first.
+        await asyncio.sleep(0.03)
+        baseline = stream.getvalue()
+        indicator.pause()
+        # Whatever was on the line gets cleared as part of pause().
+        assert stream.getvalue().endswith('\r\x1b[K')
+        await asyncio.sleep(0.03)
+        # No new frames should have been written after the clear.
+        assert stream.getvalue() == baseline + '\r\x1b[K'
+
+
+async def test_indicator_resume_restarts_frame_emission() -> None:
+    """After resume(), the animator writes frames again."""
+    stream = _FakeTTYStream()
+    async with InferenceIndicator(message='thinking', stream=stream, interval=0.01) as indicator:
+        indicator.pause()
+        await asyncio.sleep(0.02)
+        paused_state = stream.getvalue()
+        indicator.resume()
+        await asyncio.sleep(0.03)
+        # At least one new frame written after resume.
+        assert len(stream.getvalue()) > len(paused_state)
+
+
+async def test_suspend_indicator_pauses_and_resumes_active_indicator() -> None:
+    """`suspend_indicator()` is the public API the gate handler uses.
+
+    Round-trip test: spinner runs, suspend, no frames during the
+    suspended block, frames resume after. The contextvar wiring lives
+    in `core.repl`; this test confirms the indicator and the helper
+    cooperate.
+    """
+    from butter_agent.core.repl import suspend_indicator
+
+    stream = _FakeTTYStream()
+    async with InferenceIndicator(message='thinking', stream=stream, interval=0.01):
+        await asyncio.sleep(0.03)
+        before = stream.getvalue()
+        async with suspend_indicator():
+            # `suspend_indicator` should have paused the active indicator.
+            # Allow a tick for the animator to observe the pause flag.
+            await asyncio.sleep(0.02)
+            mid = stream.getvalue()
+            # Only the clear-line sequence appended after entry.
+            assert mid.endswith('\r\x1b[K')
+            # No further spinner frames written during the suspended block.
+            assert mid.count('thinking') == before.count('thinking')
+        # After suspend exits, frames resume.
+        await asyncio.sleep(0.03)
+        after = stream.getvalue()
+        assert after.count('thinking') > mid.count('thinking')
+
+
+async def test_suspend_indicator_is_noop_when_no_indicator_registered() -> None:
+    """In tests / non-TTY runs no indicator is active; suspend must not blow up."""
+    from butter_agent.core.repl import suspend_indicator
+
+    async with suspend_indicator():
+        # Body runs normally; no exception, no registered indicator to touch.
+        pass
+
+
 # --- _SlashCommandCompleter -------------------------------------------------
 
 
