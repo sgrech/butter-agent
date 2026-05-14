@@ -147,6 +147,23 @@ def test_model_timeout_seconds_rejects_non_numeric() -> None:
         load_config('[model]\ntimeout_seconds = "fast"')
 
 
+def test_model_think_defaults_false() -> None:
+    """Chain-of-thought is off by default - butter's two-call loop pays
+    the CoT cost twice per turn, and live-REPL testing on 2026-05-14
+    showed 2-3x latency on qwen3:8b with thinking enabled.
+    """
+    assert load_config('').model.think is False
+
+
+def test_model_think_override_true() -> None:
+    assert load_config('[model]\nthink = true').model.think is True
+
+
+def test_model_think_rejects_non_bool() -> None:
+    with pytest.raises(ConfigError, match=r'model\.think.*expected bool'):
+        load_config('[model]\nthink = "yes"')
+
+
 def test_model_timeout_seconds_rejects_nan() -> None:
     # TOML 1.0 permits `nan` as a float literal, and `nan <= 0` is False
     # (every comparison with NaN is False), so without the isfinite guard

@@ -75,6 +75,74 @@ def test_parse_manifest_rejects_unknown_blast_radius() -> None:
         parse_manifest(bad)
 
 
+@pytest.mark.parametrize(
+    'bad_name',
+    [
+        'Has-Hyphen',
+        'has space',
+        '1leading_digit',
+        'has.dot',
+        'UpperCase',
+    ],
+)
+def test_parse_manifest_rejects_unsafe_plugin_name(bad_name: str) -> None:
+    """Plugin names are interpolated into the model prompt — restrict charset.
+
+    PR #17 review (Copilot): without a charset restriction at parse
+    time, a malicious or careless manifest could break prompt
+    structure or enable prompt injection. Enforcing
+    `[a-z][a-z0-9_]*` at the trust boundary means downstream
+    renderers (ollama prompt, debug output, failure_reason) can
+    interpolate verbatim. Quote/newline names are caught one layer up
+    by tomllib (see `test_parse_manifest_rejects_quote_or_newline_in_name`).
+    """
+    bad = _valid_toml(name=bad_name)
+    with pytest.raises(ManifestError, match='plugin name'):
+        parse_manifest(bad)
+
+
+@pytest.mark.parametrize(
+    'bad_name',
+    [
+        'has"quote',
+        'has\nnewline',
+    ],
+)
+def test_parse_manifest_rejects_quote_or_newline_in_name(bad_name: str) -> None:
+    """The two highest-risk injection vectors are stopped by tomllib itself.
+
+    A quote-bearing name produces malformed TOML (`name = "has"quote"`);
+    a newline-bearing name straddles a key/value boundary. Either way
+    `tomllib.loads` raises and we rewrap as `ManifestError('invalid
+    TOML: ...')`. The identifier-charset check above covers the
+    valid-TOML-but-unsafe cases; these tests pin the upstream guard so
+    a future regression that loosens TOML handling can't silently
+    reopen the injection surface.
+    """
+    bad = _valid_toml(name=bad_name)
+    with pytest.raises(ManifestError, match='invalid TOML'):
+        parse_manifest(bad)
+
+
+def test_parse_manifest_rejects_unsafe_capability_name() -> None:
+    """Capability names share the same restriction as plugin names for the same reason."""
+    toml_text = """
+[plugin]
+name = "ok"
+version = "0.1.0"
+blast_radius = "read-only"
+entrypoint = "main:Plugin"
+
+[[capability]]
+name = "bad-name"
+description = "anything"
+input_schema = {}
+output_schema = {}
+"""
+    with pytest.raises(ManifestError, match='capability name'):
+        parse_manifest(toml_text)
+
+
 def test_parse_manifest_requires_at_least_one_capability() -> None:
     toml_text = """
 [plugin]

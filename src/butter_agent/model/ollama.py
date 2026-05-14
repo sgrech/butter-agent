@@ -138,11 +138,13 @@ class OllamaModelClient:
         host: str = DEFAULT_HOST,
         model: str = DEFAULT_MODEL,
         timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
+        think: bool = False,
         transport: Transport | None = None,
     ) -> None:
         self._host = host.rstrip('/')
         self._model = model
         self._timeout = timeout_seconds
+        self._think = think
         self._transport: Transport = transport if transport is not None else _UrllibTransport()
 
     async def generate(self, context: ModelContext) -> ModelOutput:
@@ -159,6 +161,11 @@ class OllamaModelClient:
             ],
             'format': 'json',
             'stream': False,
+            # Ollama field for qwen3 / deepseek-r1 / other CoT models.
+            # False = no <think>...</think> emission, ~2-3x faster on
+            # qwen3:8b per 2026-05-14 testing. Older Ollama builds and
+            # non-CoT models ignore the field.
+            'think': self._think,
         }
         response = await self._transport.post(f'{self._host}/api/chat', body, self._timeout)
         content = _extract_content(response)
@@ -168,23 +175,36 @@ class OllamaModelClient:
 # --- Prompt construction -----------------------------------------------------
 
 _SYSTEM_PROMPT = """\
-You are butter-agent, a local-first personal assistant. You can chat
-directly, and you can plan multi-step actions only by invoking plugins
-that appear in the "Available capabilities" section of the user message.
+You are butter-agent, a local-first personal assistant. Your primary
+job is to invoke the plugins listed in the "Available capabilities"
+section of the user message — chat is the fallback, not the default.
 
-The "Available capabilities" section is the complete and exhaustive list
-of plugin actions available to you. If it is empty (shown as "(none)"),
-you have no plugins installed — you can only chat. Never list, describe,
-imply, or speculate about capabilities beyond what is shown there, and
-never claim to access files, the web, calendars, email, or any other
-external system unless a matching capability is listed.
+Decision rule (apply in this order):
 
-Respond with a JSON object matching exactly one of these schemas.
+1. If any listed capability could produce the answer the user is
+   asking for, you MUST return a plan that invokes it. Do not answer
+   from your own knowledge. Do not fabricate values (times, dates,
+   prices, locations, file contents, search results) that a listed
+   capability could produce. You do not know the current time, the
+   weather, or any other live value — the plugins do.
+2. If no listed capability matches, return a "reply" explaining what
+   is missing. Do not invent a plugin name or fabricate a plan.
+3. If the request is purely conversational (greeting, opinion,
+   clarification), return a "reply".
 
-For a direct conversational reply:
+The "Available capabilities" section is the complete and exhaustive
+list of plugin actions available to you. If it is empty (shown as
+"(none)"), you have no plugins installed. Never list, describe, imply,
+or speculate about capabilities beyond what is shown there, and never
+claim to access files, the web, calendars, email, or any other external
+system unless a matching capability is listed.
+
+Output schemas — your response must be exactly one of these:
+
+Reply:
   {"type": "reply", "text": "..."}
 
-For a plugin task plan (use only when an available capability is needed):
+Plan:
   {"type": "plan", "steps": [
     {
       "step": 1,
@@ -202,9 +222,12 @@ earlier step's "outputs_as" are valid. Use "gate": "confirm" for any
 step the user should approve before it runs; use "gate": "human" when
 the user should review prior outputs first.
 
-If the user asks for something that would require a capability and no
-matching capability is listed above, return a "reply" explaining what
-is missing — do not invent a plugin name or fabricate a plan.
+Worked example. If the available capabilities include:
+  - plugin "clock" capability "now": Current date and time...
+and the user asks "What time is it?", the correct response is:
+  {"type":"plan","steps":[{"step":1,"plugin":"clock","capability":"now","inputs":{},"gate":"none","outputs_as":"t"}]}
+NOT a reply that states a time. You have no way to know the time
+without invoking the plugin.
 
 Return JSON only. No prose outside the object.
 """
@@ -220,6 +243,12 @@ Produce a JSON object: {"type": "reply", "text": "..."} where text is a
 short, natural-language answer to the user's original request, grounded
 in the tool results. Quote concrete values from the outputs where they
 help; convert units or timezones if the user asked for that.
+
+If a step is marked "FAILED" in the tool results, acknowledge the
+failure plainly in your reply — say which step failed and why. Do not
+invent successful outputs for it. If earlier steps in the plan
+succeeded, you may still use their values; if the failure left the
+user's question unanswered, say so and suggest a next step.
 
 Do not return "type": "plan". Do not propose new plugin actions. The
 plan has already run. Return JSON only. No prose outside the object.
@@ -247,7 +276,7 @@ def _render_user_prompt(context: ModelContext) -> str:
         capabilities = _expect_tuple(payload.get('capabilities', ()), CapabilityDescriptor, 'capabilities')
         parts.append('Available capabilities:')
         if capabilities:
-            parts.extend(f'- {c.plugin}.{c.capability}: {c.description}' for c in capabilities)
+            parts.extend(_render_capability(c) for c in capabilities)
         else:
             parts.append('(none)')
         parts.append('')
@@ -275,15 +304,36 @@ def _render_user_prompt(context: ModelContext) -> str:
         parts.append('Tool results:')
         for step in execution.plan.steps:
             alias = f' → ${step.outputs_as}' if step.outputs_as else ''
-            parts.append(f'- step {step.step}: {step.plugin}.{step.capability}{alias}')
-            if step.outputs_as is not None and step.outputs_as in execution.outputs:
-                fields = execution.outputs[step.outputs_as]
-                for key, value in fields.items():
-                    parts.append(f'    {key}: {value!r}')
+            if execution.failed_at_step is not None and step.step == execution.failed_at_step:
+                parts.append(f'- step {step.step}: {step.plugin}.{step.capability}{alias} — FAILED: {execution.failure_reason}')
+            elif execution.failed_at_step is not None and step.step > execution.failed_at_step:
+                # Steps after the failure point did not run; surface that
+                # explicitly so the model doesn't fabricate their outputs.
+                parts.append(f'- step {step.step}: {step.plugin}.{step.capability}{alias} — did not run (prior step failed)')
+            else:
+                parts.append(f'- step {step.step}: {step.plugin}.{step.capability}{alias}')
+                if step.outputs_as is not None and step.outputs_as in execution.outputs:
+                    fields = execution.outputs[step.outputs_as]
+                    for key, value in fields.items():
+                        parts.append(f'    {key}: {value!r}')
         parts.append('')
 
     parts.append(f'User: {context.turn.user_input}')
     return '\n'.join(parts)
+
+
+def _render_capability(cap: CapabilityDescriptor) -> str:
+    # Plugin and capability are rendered with the same field names the JSON
+    # plan schema uses (`plugin`, `capability`). User-test on 2026-05-14
+    # with mistral-nemo:12b: the previous `- clock.now: ...` shorthand
+    # caused the model to put the dotted form into the `plugin` field
+    # ("plugin": "clock.now") instead of splitting at the dot. Naming the
+    # fields explicitly removes the ambiguity.
+    head = f'- plugin "{cap.plugin}" capability "{cap.capability}"'
+    if cap.required_inputs:
+        required = ', '.join(cap.required_inputs)
+        return f'{head} (requires: {required}): {cap.description}'
+    return f'{head}: {cap.description}'
 
 
 def _expect_tuple[T](value: object, item_type: type[T], label: str) -> tuple[T, ...]:

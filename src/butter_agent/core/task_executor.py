@@ -123,6 +123,28 @@ def _parse_ref(value: object) -> _VarRef | None:
     return _VarRef(alias=match.group(1), field=match.group(2))
 
 
+_FAILURE_REASON_MAX_CHARS = 300
+
+
+def _format_failure_reason(step: PlanStep, exc: BaseException) -> str:
+    """Build a single-line, length-bounded failure_reason string.
+
+    Plugin exceptions are user-controlled-ish (third-party code,
+    invariant #6) and their messages can carry newlines or be huge.
+    `failure_reason` is interpolated into the synthesis prompt and the
+    debug output — a stray newline breaks the prompt structure, an
+    enormous message wastes context. Normalise here so downstream
+    renderers can interpolate without escaping. Plugin and capability
+    names are already restricted to a safe charset at manifest-parse
+    time (see `core/registry.py`), so quoting them is enough.
+    """
+    raw = str(exc)
+    one_line = ' '.join(raw.split()) if raw else ''
+    if len(one_line) > _FAILURE_REASON_MAX_CHARS:
+        one_line = one_line[: _FAILURE_REASON_MAX_CHARS - 1] + '…'
+    return f'plugin {step.plugin!r} capability {step.capability!r} raised {type(exc).__name__}: {one_line}'
+
+
 def _freeze_outputs(outputs: Mapping[str, Mapping[str, object]]) -> Mapping[str, Mapping[str, object]]:
     """Return a read-only snapshot of the executor's output pool.
 
@@ -182,7 +204,26 @@ class DefaultTaskExecutor:
 
             resolved_inputs = self._resolve_inputs(step, outputs)
             registered = self._registry.get(step.plugin)
-            step_output = await registered.plugin.execute(step.capability, resolved_inputs)
+            try:
+                step_output = await registered.plugin.execute(step.capability, resolved_inputs)
+            except ExecutorError:
+                # Don't swallow our own contract errors — those are
+                # programming faults (bad plan validation, missing alias)
+                # and must surface to the caller, not the model.
+                raise
+            except Exception as exc:
+                # Plugins are third-party code (invariant #6) and may raise
+                # for any reason. Record the failure as a value on the
+                # ExecutionResult so the loop can still run synthesis and
+                # let the model acknowledge it to the user. Stop here:
+                # downstream steps usually reference this step's outputs
+                # via $alias.field and would cascade-fail anyway.
+                return ExecutionResult(
+                    plan=plan,
+                    outputs=dict(outputs),
+                    failed_at_step=step.step,
+                    failure_reason=_format_failure_reason(step, exc),
+                )
 
             if step.outputs_as is not None:
                 outputs[step.outputs_as] = dict(step_output)

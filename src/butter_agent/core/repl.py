@@ -21,6 +21,7 @@ What the REPL does NOT do:
 
 from __future__ import annotations
 
+import os
 import sys
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -270,6 +271,8 @@ class Repl:
 
     def _render(self, result: TurnResult) -> None:
         if result.reply is not None:
+            if _debug_enabled():
+                self._output.write('[debug] model emitted: reply\n')
             self._output.write(f'{result.reply.text}\n')
             return
         # By construction of TurnResult, exactly one of reply / executed_plan is set.
@@ -280,6 +283,22 @@ class Repl:
         if execution.halted_at_step is not None:
             self._output.write(f'[halted at step {execution.halted_at_step}] {execution.halt_reason}\n')
             return
+        if _debug_enabled():
+            # Make plan execution visible on the happy path too — without
+            # this the operator cannot tell whether a precise-looking reply
+            # came from a real plugin invocation or model confabulation.
+            self._output.write(f'[debug] plan executed: {len(execution.plan.steps)} step(s)\n')
+            for step in execution.plan.steps:
+                marker = ''
+                if execution.failed_at_step == step.step:
+                    marker = ' [FAILED]'
+                elif execution.failed_at_step is not None and step.step > execution.failed_at_step:
+                    marker = ' [skipped]'
+                self._output.write(f'[debug]   step {step.step}: {step.plugin}.{step.capability}{marker} inputs={step.inputs!r}\n')
+            if execution.failure_reason is not None:
+                self._output.write(f'[debug]   failure: {execution.failure_reason}\n')
+            for alias, fields in execution.outputs.items():
+                self._output.write(f'[debug]   ${alias} = {dict(fields)!r}\n')
         if execution.synthesis_reply is not None:
             # Successful execution went through the synthesis pass. The
             # synthesized reply is the assistant surface; the executed plan
@@ -292,3 +311,10 @@ class Repl:
         self._output.write(f'[plan executed: {len(execution.plan.steps)} step(s)]\n')
         for alias, fields in execution.outputs.items():
             self._output.write(f'  ${alias}: {dict(fields)!r}\n')
+
+
+def _debug_enabled() -> bool:
+    # BUTTER_DEBUG=1/true/yes turns on per-turn visibility into what the
+    # model emitted and which plugin call(s) actually ran. Off by default
+    # because the markers pollute scripted use of the REPL.
+    return os.environ.get('BUTTER_DEBUG', '').lower() in {'1', 'true', 'yes'}

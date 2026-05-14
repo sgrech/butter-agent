@@ -23,6 +23,7 @@ What this module does NOT do:
 
 from __future__ import annotations
 
+import re
 import tomllib
 from dataclasses import dataclass
 from enum import StrEnum
@@ -139,6 +140,15 @@ class CapabilityNotFoundError(RegistryError):
 # --- Manifest parsing --------------------------------------------------------
 
 
+# Plugin and capability names are surfaced verbatim into the model prompt
+# (e.g. `plugin "clock" capability "now"`) and into `failure_reason`
+# strings. Restricting them to a safe identifier charset at parse time
+# means downstream renderers can interpolate without escaping —
+# fix-at-the-trust-boundary, per PR #17 review.
+_IDENTIFIER_RE = re.compile(r'^[a-z][a-z0-9_]*$')
+_IDENTIFIER_HINT = 'must match [a-z][a-z0-9_]* (lowercase letter, then lowercase letters/digits/underscores)'
+
+
 def parse_manifest(toml_text: str) -> PluginManifest:
     """Parse a manifest.toml document and validate its shape.
 
@@ -159,6 +169,8 @@ def parse_manifest(toml_text: str) -> PluginManifest:
 
     plugin_section = _require_section(data, 'plugin')
     name = _require_str(plugin_section, 'plugin.name')
+    if not _IDENTIFIER_RE.match(name):
+        raise ManifestError(f'plugin name {name!r}: {_IDENTIFIER_HINT}')
     version = _require_str(plugin_section, 'plugin.version', key='version')
     entrypoint = _require_str(plugin_section, 'plugin.entrypoint', key='entrypoint')
     radius_raw = _require_str(plugin_section, 'plugin.blast_radius', key='blast_radius')
@@ -216,6 +228,8 @@ def _parse_capability(plugin_name: str, raw: object) -> Capability:
     output_schema = raw.get('output_schema', {})
     if not isinstance(name, str) or not name:
         raise ManifestError(f'plugin {plugin_name!r}: capability missing string name')
+    if not _IDENTIFIER_RE.match(name):
+        raise ManifestError(f'plugin {plugin_name!r}: capability name {name!r}: {_IDENTIFIER_HINT}')
     if not isinstance(description, str) or not description:
         raise ManifestError(f'plugin {plugin_name!r}: capability {name!r} missing description')
     if not isinstance(input_schema, dict):
