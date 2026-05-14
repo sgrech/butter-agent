@@ -115,18 +115,27 @@ class TurnResult:
 class ExecutionResult:
     """Envelope returned by the executor, optionally augmented with a synthesis reply.
 
-    The executor itself only populates `plan`, `outputs`, and the halt fields.
-    The loop fills in `synthesis_reply` after a successful (non-halted) run by
-    calling the model a second time with the tool outputs in context. This is
-    what carries plugin results into the conversation surface — without it
-    the agent is a one-shot tool dispatcher with no awareness of what the
-    tools observed.
+    Three terminal states are encoded by which optional fields are set:
+
+    - Success: only `plan` and `outputs` (all steps ran).
+    - Halted: `halted_at_step` + `halt_reason` (a `confirm`/`human` gate
+      aborted before the step ran). No synthesis runs — the user
+      explicitly stopped the plan.
+    - Failed: `failed_at_step` + `failure_reason` (a plugin raised mid-
+      step). `outputs` contains whatever the prior steps produced.
+      Synthesis still runs so the model can acknowledge the failure to
+      the user. See `plugin-failure-recovery.md`.
+
+    `synthesis_reply` is filled by the loop after the second model
+    call. The executor never sets it.
     """
 
     plan: TaskPlan
     outputs: dict[str, dict[str, object]] = field(default_factory=dict)
     halted_at_step: int | None = None
     halt_reason: str | None = None
+    failed_at_step: int | None = None
+    failure_reason: str | None = None
     synthesis_reply: ModelReply | None = None
 
 
@@ -247,15 +256,22 @@ class AgentLoop:
         execution = await self._executor.execute(output)
 
         if execution.halted_at_step is not None:
+            # Halted by a gate (user aborted). No synthesis — the user
+            # explicitly stopped the plan and does not need a recap.
             await self._record(turn, execution.halt_reason)
             return TurnResult(turn=turn, executed_plan=execution)
 
+        # Successful or failed executions both run synthesis. On failure
+        # the synthesis prompt surfaces the failed step so the model can
+        # acknowledge it; see plugin-failure-recovery.md.
         synthesis = await self._synthesize(turn, execution)
         execution_with_reply = ExecutionResult(
             plan=execution.plan,
             outputs=execution.outputs,
             halted_at_step=execution.halted_at_step,
             halt_reason=execution.halt_reason,
+            failed_at_step=execution.failed_at_step,
+            failure_reason=execution.failure_reason,
             synthesis_reply=synthesis,
         )
         await self._record(turn, synthesis.text)

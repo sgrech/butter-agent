@@ -26,6 +26,11 @@ host = "http://localhost:11434"
 # Per-call timeout in seconds. 60 suits warm requests; bump it (e.g. 180)
 # if you regularly cold-load larger models over LAN.
 timeout_seconds = 60
+# Chain-of-thought emission for CoT models (qwen3, deepseek-r1, etc).
+# Off by default: the planning loop calls the model twice per turn
+# (intent + synthesis) and CoT pays its cost on each call. Set true
+# only if a specific model produces noticeably worse plans without it.
+think = false
 
 [storage]
 # Local SQLite by default. Path is expanded by the storage provider at

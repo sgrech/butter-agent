@@ -22,14 +22,14 @@ from pathlib import Path
 
 from butter_agent.cli_commands import build_default_commands
 from butter_agent.core.config import Config, load_config
-from butter_agent.core.context_manager import DefaultContextManager
+from butter_agent.core.context_manager import DefaultContextManager, InMemoryConversationHistory
 from butter_agent.core.loop import AgentLoop
 from butter_agent.core.plugin_source import PluginLoader, PluginLoadError
 from butter_agent.core.registry import RegistryBuilder, RegistryError
 from butter_agent.core.repl import InputSource, Output, Repl, ReplGateHandler, StdioInputSource, StdioOutput
 from butter_agent.core.task_executor import DefaultTaskExecutor
 from butter_agent.model.ollama import OllamaModelClient
-from butter_agent.storage.sqlite import Database, SqliteConversationHistory
+from butter_agent.storage.sqlite import Database
 
 # --- Config path resolution --------------------------------------------------
 
@@ -98,8 +98,13 @@ async def build_repl(
     io_in = input_source if input_source is not None else StdioInputSource()
     io_out = output if output is not None else StdioOutput()
 
+    # `Database` is opened so the storage path is created/validated and a
+    # connection handle is ready for future consumers (plugin state, etc.).
+    # Conversation history is deliberately in-memory: every butter
+    # invocation starts a fresh chat session. A persisted-history design
+    # paired with explicit sessions is future work — see scope notes.
     database = await Database.open(config.storage.path)
-    history = await SqliteConversationHistory.create(database)
+    history = InMemoryConversationHistory()
     loader = plugin_loader if plugin_loader is not None else PluginLoader()
     loaded = loader.load_all(config.plugins)
     builder = RegistryBuilder(max_blast_radius=config.core.max_blast_radius)
@@ -119,6 +124,7 @@ async def build_repl(
         host=config.model.host,
         model=config.model.model,
         timeout_seconds=config.model.timeout_seconds,
+        think=config.model.think,
     )
     gate_handler = ReplGateHandler(io_in, io_out)
     executor = DefaultTaskExecutor(registry, gate_handler)

@@ -76,6 +76,13 @@ class ModelConfig:
     model: str = 'qwen3:8b'
     host: str = 'http://localhost:11434'
     timeout_seconds: float = 60.0
+    # `think` controls Ollama's chain-of-thought emission for models that
+    # support it (qwen3, deepseek-r1, etc). Defaults to false because
+    # butter's two-call planning loop (intent + synthesis) pays the CoT
+    # cost twice per turn; live-REPL testing on 2026-05-14 saw 2-3x
+    # latency on qwen3:8b with thinking enabled. Set true if a particular
+    # model produces worse plans without CoT.
+    think: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -187,6 +194,7 @@ def dump_config(config: Config) -> str:
     lines.append(f'model = {_quote(config.model.model)}')
     lines.append(f'host = {_quote(config.model.host)}')
     lines.append(f'timeout_seconds = {_format_number(config.model.timeout_seconds)}')
+    lines.append(f'think = {"true" if config.model.think else "false"}')
     lines.append('')
 
     lines.append('[storage]')
@@ -258,11 +266,13 @@ def _parse_core(section: dict[str, object]) -> CoreConfig:
 def _parse_model(section: dict[str, object]) -> ModelConfig:
     defaults = ModelConfig()
     timeout = _optional_positive_float(section, 'model.timeout_seconds', 'timeout_seconds')
+    think = _optional_bool(section, 'model.think', 'think')
     return ModelConfig(
         provider=_optional_str(section, 'model.provider', 'provider') or defaults.provider,
         model=_optional_str(section, 'model.model', 'model') or defaults.model,
         host=_optional_str(section, 'model.host', 'host') or defaults.host,
         timeout_seconds=timeout if timeout is not None else defaults.timeout_seconds,
+        think=think if think is not None else defaults.think,
     )
 
 
@@ -353,6 +363,17 @@ def _optional_str(section: dict[str, object], path: str, key: str) -> str | None
     value = section[key]
     if not isinstance(value, str):
         raise ConfigError(f'{path}: expected string, got {type(value).__name__}')
+    return value
+
+
+def _optional_bool(section: dict[str, object], path: str, key: str) -> bool | None:
+    if key not in section:
+        return None
+    value = section[key]
+    # `isinstance(True, int)` is True in Python — guard explicitly so a
+    # stray integer doesn't silently masquerade as a bool.
+    if not isinstance(value, bool):
+        raise ConfigError(f'{path}: expected bool, got {type(value).__name__}')
     return value
 
 

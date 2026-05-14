@@ -52,6 +52,29 @@ entrypoint = "main:Plugin"
 """
 
 
+def _manifest_toml_with_schema(name: str, capability: str, description: str, input_schema: dict[str, str]) -> str:
+    """Manifest variant that exposes a non-empty input_schema.
+
+    The flat `_manifest_toml` helper hard-codes empty schemas; this
+    variant exists so tests can exercise the `required_inputs` surface
+    on `CapabilityDescriptor` without rewriting the existing helper.
+    """
+    fields = ', '.join(f'{key} = "{type_name}"' for key, type_name in input_schema.items())
+    return f"""
+[plugin]
+name = "{name}"
+version = "0.1.0"
+blast_radius = "read-only"
+entrypoint = "main:Plugin"
+
+[[capability]]
+name = "{capability}"
+description = "{description}"
+input_schema = {{ {fields} }}
+output_schema = {{}}
+"""
+
+
 def _registry(*plugins: tuple[str, tuple[tuple[str, str], ...]]) -> PluginRegistry:
     builder = RegistryBuilder(max_blast_radius=BlastRadius.NETWORK)
     for plugin_name, caps in plugins:
@@ -243,6 +266,45 @@ def test_negative_memory_top_k_rejected() -> None:
         DefaultContextManager(registry, InMemoryConversationHistory(), memory_top_k=-1)
 
 
+async def test_assemble_surfaces_required_inputs_on_descriptor() -> None:
+    """Descriptors expose the manifest's input_schema keys as `required_inputs`.
+
+    Without this, the model has no way to know step inputs like `tz` are
+    required and the executor atomically rejects the plan — see the
+    `model-baseline-and-input-schema-prompt` spec for the failure mode.
+    """
+    builder = RegistryBuilder(max_blast_radius=BlastRadius.NETWORK)
+    manifest = parse_manifest(
+        _manifest_toml_with_schema('clock', 'now', 'Return the current wall-clock time.', {'tz': 'string'}),
+    )
+    builder.register(manifest, _StubPlugin())
+    registry = builder.build()
+    surfaced: list[tuple[CapabilityDescriptor, ...]] = []
+
+    class _Capture:
+        def select(
+            self,
+            turn: Turn,
+            available: tuple[CapabilityDescriptor, ...],
+        ) -> tuple[CapabilityDescriptor, ...]:
+            surfaced.append(available)
+            return available
+
+    cm = DefaultContextManager(registry, InMemoryConversationHistory(), capability_filter=_Capture())
+    await cm.assemble(_turn('what time is it'))
+
+    assert surfaced == [
+        (
+            CapabilityDescriptor(
+                plugin='clock',
+                capability='now',
+                description='Return the current wall-clock time.',
+                required_inputs=('tz',),
+            ),
+        ),
+    ]
+
+
 # --- KeywordCapabilityFilter ------------------------------------------------
 
 
@@ -283,6 +345,21 @@ def test_keyword_filter_falls_back_when_input_is_empty() -> None:
     )
     out = KeywordCapabilityFilter(top_k=1).select(_turn(''), available)
     assert out == available[:1]
+
+
+def test_keyword_filter_ranks_required_input_names_as_haystack_tokens() -> None:
+    """Required-input names participate in token-overlap scoring.
+
+    Without this, "what time is it in china" would not pick `clock.now`
+    over an unrelated capability whose description happens to mention
+    time, because `tz` / `timezone` only appears in the input schema.
+    """
+    available = (
+        CapabilityDescriptor(plugin='notes', capability='create', description='Save a note'),
+        CapabilityDescriptor(plugin='clock', capability='now', description='Return the current wall-clock value', required_inputs=('timezone',)),
+    )
+    out = KeywordCapabilityFilter(top_k=1).select(_turn('timezone for shanghai'), available)
+    assert out[0].plugin == 'clock'
 
 
 def test_keyword_filter_rejects_non_positive_top_k() -> None:

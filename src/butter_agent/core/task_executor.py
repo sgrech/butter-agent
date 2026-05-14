@@ -182,7 +182,26 @@ class DefaultTaskExecutor:
 
             resolved_inputs = self._resolve_inputs(step, outputs)
             registered = self._registry.get(step.plugin)
-            step_output = await registered.plugin.execute(step.capability, resolved_inputs)
+            try:
+                step_output = await registered.plugin.execute(step.capability, resolved_inputs)
+            except ExecutorError:
+                # Don't swallow our own contract errors — those are
+                # programming faults (bad plan validation, missing alias)
+                # and must surface to the caller, not the model.
+                raise
+            except Exception as exc:
+                # Plugins are third-party code (invariant #6) and may raise
+                # for any reason. Record the failure as a value on the
+                # ExecutionResult so the loop can still run synthesis and
+                # let the model acknowledge it to the user. Stop here:
+                # downstream steps usually reference this step's outputs
+                # via $alias.field and would cascade-fail anyway.
+                return ExecutionResult(
+                    plan=plan,
+                    outputs=dict(outputs),
+                    failed_at_step=step.step,
+                    failure_reason=f'plugin {step.plugin!r} capability {step.capability!r} raised: {exc}',
+                )
 
             if step.outputs_as is not None:
                 outputs[step.outputs_as] = dict(step_output)

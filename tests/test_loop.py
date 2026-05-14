@@ -157,6 +157,37 @@ async def test_halted_plan_skips_synthesis() -> None:
     assert len(model.contexts_seen) == 1
 
 
+async def test_failed_plan_runs_synthesis_with_failure_in_context() -> None:
+    """A plugin-failed execution still runs synthesis so the model can apologise.
+
+    Spec: `plugin-failure-recovery.md`. Contrast with `halted` (operator
+    aborted — no synthesis) and `success` (synthesis to summarise
+    outputs). Failure synthesises so the user gets a reply explaining
+    what broke instead of a bare `[error] plan rejected: ...`.
+    """
+    plan = TaskPlan(
+        steps=(PlanStep(step=1, plugin='clock', capability='diff', inputs={}, gate='none'),),
+    )
+    failed = ExecutionResult(
+        plan=plan,
+        outputs={},
+        failed_at_step=1,
+        failure_reason="plugin 'clock' capability 'diff' raised: bad input",
+    )
+    synthesis = ModelReply(text='Sorry, the diff step failed because the timestamps were not ISO strings.')
+    loop, _cm, model, _ = _wire(plan, synthesis, executor_result=failed)
+
+    result = await loop.run_turn('diff two times')
+
+    assert result.executed_plan is not None
+    assert result.executed_plan.failed_at_step == 1
+    assert result.executed_plan.synthesis_reply == synthesis
+    # Two model calls: intent + synthesis. Synthesis context carries the
+    # failed execution so the prompt can render the FAILED marker.
+    assert len(model.contexts_seen) == 2
+    assert model.contexts_seen[1].payload['execution'] is failed
+
+
 async def test_synthesis_rejects_recursive_plan() -> None:
     # If the model returns another plan during synthesis, that's a protocol
     # violation — synthesis must reply, not propose new actions.

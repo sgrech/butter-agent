@@ -16,6 +16,7 @@ from butter_agent.core.loop import PlanStep, TaskPlan
 from butter_agent.core.registry import (
     BlastRadius,
     Capability,
+    Plugin,
     PluginManifest,
     RegistryBuilder,
 )
@@ -69,7 +70,7 @@ def _cap(name: str, input_schema: dict[str, object] | None = None, output_schema
 
 
 def _make_executor(
-    *pairs: tuple[PluginManifest, _RecordingPlugin],
+    *pairs: tuple[PluginManifest, Plugin],
     gate_handler: GateHandler | None = None,
 ) -> DefaultTaskExecutor:
     builder = RegistryBuilder(max_blast_radius=BlastRadius.NETWORK)
@@ -480,3 +481,73 @@ async def test_non_network_plugin_keeps_declared_none_gate() -> None:
 
     assert handler.seen == []
     assert plugin.calls == [('do', {})]
+
+
+# --- Plugin execution errors ------------------------------------------------
+
+
+class _RaisingPlugin:
+    """Plugin stub that raises an arbitrary exception from execute()."""
+
+    def __init__(self, exc: Exception) -> None:
+        self._exc = exc
+
+    async def execute(self, capability: str, inputs: dict[str, object]) -> dict[str, object]:
+        raise self._exc
+
+
+async def test_plugin_runtime_exception_recorded_as_failure_not_raised() -> None:
+    """Plugins are third-party code (invariant #6) and may raise for any reason.
+
+    User-test on 2026-05-14: `clock.diff` raised ValueError mid-turn
+    and the traceback tore the REPL down. New contract: the executor
+    catches the exception, returns an `ExecutionResult` with
+    `failed_at_step` / `failure_reason` set, and the loop runs
+    synthesis so the model acknowledges the failure to the user. See
+    `specs/development/plugin-failure-recovery.md`.
+    """
+    plugin = _RaisingPlugin(ValueError('bad input'))
+    manifest = _manifest('clock', capabilities=(_cap('diff'),))
+    executor = _make_executor((manifest, plugin))
+
+    plan = TaskPlan(steps=(PlanStep(step=1, plugin='clock', capability='diff', inputs={}, gate='none', outputs_as=None),))
+
+    result = await executor.execute(plan)
+
+    assert result.failed_at_step == 1
+    assert result.failure_reason is not None
+    assert "plugin 'clock' capability 'diff' raised: bad input" in result.failure_reason
+    assert result.outputs == {}
+    assert result.halted_at_step is None
+
+
+async def test_plugin_failure_stops_subsequent_steps_with_partial_outputs() -> None:
+    """A mid-plan failure stops execution; prior steps' outputs are preserved.
+
+    Downstream steps typically reference the failed step's `$alias.field`
+    and would cascade-fail anyway. Stopping at the failure point and
+    surfacing partial outputs gives the synthesis turn enough context
+    to acknowledge what ran versus what didn't.
+    """
+    good = _RecordingPlugin(responses={'do': {'value': 7}})
+    bad = _RaisingPlugin(RuntimeError('boom'))
+    executor = _make_executor(
+        (_manifest('a', capabilities=(_cap('do'),)), good),
+        (_manifest('b', capabilities=(_cap('do'),)), bad),
+    )
+
+    plan = TaskPlan(
+        steps=(
+            PlanStep(step=1, plugin='a', capability='do', inputs={}, gate='none', outputs_as='first'),
+            PlanStep(step=2, plugin='b', capability='do', inputs={}, gate='none', outputs_as='second'),
+            PlanStep(step=3, plugin='a', capability='do', inputs={}, gate='none', outputs_as='third'),
+        )
+    )
+
+    result = await executor.execute(plan)
+
+    assert result.failed_at_step == 2
+    assert result.outputs == {'first': {'value': 7}}
+    # Step 3 never ran — both because it was after the failure point and
+    # because the executor halts rather than cascading. Verify via call log.
+    assert good.calls == [('do', {})]

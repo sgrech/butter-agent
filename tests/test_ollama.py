@@ -303,7 +303,23 @@ async def test_request_targets_chat_endpoint_with_json_mode() -> None:
     assert body['model'] == 'qwen3:8b'
     assert body['format'] == 'json'
     assert body['stream'] is False
+    # Defaults to False - chain-of-thought adds 2-3x latency in the
+    # two-call planning loop and isn't needed for plan-emitting models.
+    assert body['think'] is False
     assert timeout == 5.0
+
+
+async def test_think_flag_propagates_to_request_body() -> None:
+    """Constructor `think=True` must round-trip into the request body.
+
+    Per-deployment opt-in for CoT models that genuinely produce better
+    plans with thinking enabled. Default stays False; this verifies the
+    override path doesn't silently drop the flag.
+    """
+    transport = _FakeTransport(response=_ollama_response({'type': 'reply', 'text': 'ok'}))
+    client = OllamaModelClient(host='http://h', model='qwen3:8b', timeout_seconds=5.0, think=True, transport=transport)
+    await client.generate(_ctx('q'))
+    assert transport.calls[0][1]['think'] is True
 
 
 async def test_request_includes_system_and_user_messages() -> None:
@@ -342,9 +358,40 @@ async def test_prompt_surfaces_capabilities() -> None:
     client, transport = _client(_ollama_response({'type': 'reply', 'text': 'ok'}))
     await client.generate(_ctx('remind me', capabilities=(cap,), history=(), memory=()))
     user_msg = _user_message(transport)
-    assert 'notes.create' in user_msg
+    assert 'plugin "notes"' in user_msg
+    assert 'capability "create"' in user_msg
     assert 'Create a note' in user_msg
     assert 'remind me' in user_msg
+
+
+async def test_prompt_renders_required_inputs_next_to_capability() -> None:
+    """Capabilities with `required_inputs` render `(requires: a, b)` inline.
+
+    Discovered during user-test on 2026-05-13: the model produced plans
+    that omitted required inputs (e.g. `tz` for `clock.now`) because the
+    prompt only showed descriptions. Surfacing the required-key list
+    inline is the minimum the model needs to produce a valid plan.
+    """
+    cap = CapabilityDescriptor(
+        plugin='clock',
+        capability='now',
+        description='Return the current wall-clock time.',
+        required_inputs=('tz',),
+    )
+    client, transport = _client(_ollama_response({'type': 'reply', 'text': 'ok'}))
+    await client.generate(_ctx('time?', capabilities=(cap,), history=(), memory=()))
+    user_msg = _user_message(transport)
+    assert '- plugin "clock" capability "now" (requires: tz): Return the current wall-clock time.' in user_msg
+
+
+async def test_prompt_omits_requires_clause_for_empty_required_inputs() -> None:
+    """No-input capabilities render without a `(requires: ...)` parenthetical."""
+    cap = CapabilityDescriptor(plugin='notes', capability='list', description='List all notes.')
+    client, transport = _client(_ollama_response({'type': 'reply', 'text': 'ok'}))
+    await client.generate(_ctx('show notes', capabilities=(cap,), history=(), memory=()))
+    user_msg = _user_message(transport)
+    assert '- plugin "notes" capability "list": List all notes.' in user_msg
+    assert 'requires' not in user_msg
 
 
 async def test_prompt_surfaces_history_and_memory() -> None:
@@ -438,9 +485,31 @@ async def test_system_prompt_forbids_fabricating_plans_without_capability() -> N
     client, transport = _client(_ollama_response({'type': 'reply', 'text': 'ok'}))
     await client.generate(_ctx(capabilities=()))
     folded = _system_prompt(transport)
-    assert 'no matching capability' in folded
-    assert 'do not invent' in folded
+    assert 'no listed capability matches' in folded
+    assert 'Do not invent' in folded
     assert 'fabricate a plan' in folded
+
+
+async def test_system_prompt_requires_plan_when_capability_matches() -> None:
+    """When a matching capability exists, the model must plan — not chat.
+
+    User-test on 2026-05-14 with hermes3:8b: asked "Can you give me the
+    current time?" with `clock.now` registered, the model fabricated a
+    time in a `ModelReply` instead of emitting a plan. The earlier
+    qwen3 failure mode was the same class — text reply containing the
+    literal placeholder `"$(clock.now)"` instead of a plan. Both bypass
+    the plan path because the original prompt framed plans as optional.
+    """
+    client, transport = _client(_ollama_response({'type': 'reply', 'text': 'ok'}))
+    await client.generate(_ctx())
+    folded = _system_prompt(transport)
+    assert 'MUST return a plan' in folded
+    assert 'Do not fabricate values' in folded
+    # Worked example anchors the rule with a concrete time-question→plan
+    # pair. Without it, 8B-class models read the rule as advisory and
+    # default to chat. Don't drop the example without a replacement.
+    assert 'Worked example' in folded
+    assert '"type":"plan"' in folded
 
 
 async def test_system_prompt_states_capability_list_is_exhaustive() -> None:
@@ -456,7 +525,6 @@ async def test_system_prompt_states_capability_list_is_exhaustive() -> None:
     folded = _system_prompt(transport)
     assert 'complete and exhaustive' in folded
     assert 'no plugins installed' in folded
-    assert 'you can only chat' in folded
 
 
 # --- Synthesis-mode prompting -----------------------------------------------
@@ -489,6 +557,49 @@ async def test_synthesis_renders_tool_results_section() -> None:
     # Output fields are surfaced with their values so the model can quote them.
     assert "time: '17:00'" in user_msg
     assert "tz: 'CEST'" in user_msg
+
+
+async def test_synthesis_marks_failed_step_and_following_steps() -> None:
+    """Failed step is rendered FAILED; subsequent steps as 'did not run'.
+
+    Spec: `plugin-failure-recovery.md`. Without explicit markers, the
+    model would either invent successful outputs for the failed step
+    or treat trailing steps as if they ran.
+    """
+    plan = TaskPlan(
+        steps=(
+            PlanStep(step=1, plugin='clock', capability='now', inputs={}, gate='none', outputs_as='t'),
+            PlanStep(step=2, plugin='clock', capability='diff', inputs={'a': '$t.time', 'b': 'x'}, gate='none', outputs_as='d'),
+            PlanStep(step=3, plugin='clock', capability='now', inputs={}, gate='none', outputs_as='t2'),
+        ),
+    )
+    failed = ExecutionResult(
+        plan=plan,
+        outputs={'t': {'time': '17:00', 'tz': 'CEST'}},
+        failed_at_step=2,
+        failure_reason="plugin 'clock' capability 'diff' raised: bad iso",
+    )
+    client, transport = _client(_ollama_response({'type': 'reply', 'text': 'ok'}))
+    await client.generate(_ctx('diff', execution=failed))
+    user_msg = _user_message(transport)
+    # Step 1 ran normally with its outputs surfaced.
+    assert 'step 1: clock.now → $t' in user_msg
+    assert "time: '17:00'" in user_msg
+    # Step 2 carries the FAILED marker and the reason.
+    assert 'step 2: clock.diff → $d — FAILED' in user_msg
+    assert 'raised: bad iso' in user_msg
+    # Step 3 explicitly did not run — no fabricated outputs.
+    assert 'step 3: clock.now → $t2 — did not run (prior step failed)' in user_msg
+
+
+async def test_synthesis_system_prompt_acknowledges_failed_steps() -> None:
+    """Synthesis prompt instructs the model to acknowledge FAILED steps."""
+    client, transport = _client(_ollama_response({'type': 'reply', 'text': 'ok'}))
+    await client.generate(_ctx('q', execution=_execution_result()))
+    folded = _system_prompt(transport)
+    assert 'FAILED' in folded
+    assert 'acknowledge the failure' in folded
+    assert 'Do not invent successful outputs' in folded
 
 
 async def test_synthesis_omits_capabilities_section() -> None:

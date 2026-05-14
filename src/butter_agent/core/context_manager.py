@@ -56,14 +56,18 @@ class MemorySnippet:
 class CapabilityDescriptor:
     """A capability advertised to the model for plan construction.
 
-    Only the plugin name, capability name, and description are surfaced.
-    Input/output schemas are the executor's concern (validation happens
-    after the model returns a plan), not the model's.
+    `required_inputs` is just the list of required input *names* — not
+    the full JSON Schema. The executor still owns semantic validation,
+    but the model needs to know which input keys it must populate to
+    produce a plan that survives `_validate_step_inputs`. Surfacing the
+    full schema would eat the token budget for no further planning
+    benefit.
     """
 
     plugin: str
     capability: str
     description: str
+    required_inputs: tuple[str, ...] = ()
 
 
 # --- Seam protocols ----------------------------------------------------------
@@ -168,7 +172,8 @@ class KeywordCapabilityFilter:
     def _haystack(self, desc: CapabilityDescriptor) -> frozenset[str]:
         cached = self._haystack_cache.get(desc)
         if cached is None:
-            cached = _tokenise(f'{desc.plugin} {desc.capability} {desc.description}')
+            required = ' '.join(desc.required_inputs)
+            cached = _tokenise(f'{desc.plugin} {desc.capability} {desc.description} {required}')
             self._haystack_cache[desc] = cached
         return cached
 
@@ -242,6 +247,11 @@ def _all_descriptors(registry: PluginRegistry) -> tuple[CapabilityDescriptor, ..
         manifest = registry.get(name).manifest
         for cap in manifest.capabilities:
             descriptors.append(
-                CapabilityDescriptor(plugin=name, capability=cap.name, description=cap.description),
+                CapabilityDescriptor(
+                    plugin=name,
+                    capability=cap.name,
+                    description=cap.description,
+                    required_inputs=tuple(cap.input_schema),
+                ),
             )
     return tuple(descriptors)

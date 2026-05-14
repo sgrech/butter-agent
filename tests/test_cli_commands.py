@@ -303,7 +303,8 @@ def test_command_registry_rejects_duplicates() -> None:
 class _StubContextManager:
     payload: dict[str, object] = field(default_factory=dict)
 
-    async def assemble(self, turn: Turn) -> ModelContext:
+    async def assemble(self, turn: Turn, execution: ExecutionResult | None = None) -> ModelContext:
+        del execution
         return ModelContext(turn=turn, payload=dict(self.payload))
 
 
