@@ -123,6 +123,28 @@ def _parse_ref(value: object) -> _VarRef | None:
     return _VarRef(alias=match.group(1), field=match.group(2))
 
 
+_FAILURE_REASON_MAX_CHARS = 300
+
+
+def _format_failure_reason(step: PlanStep, exc: BaseException) -> str:
+    """Build a single-line, length-bounded failure_reason string.
+
+    Plugin exceptions are user-controlled-ish (third-party code,
+    invariant #6) and their messages can carry newlines or be huge.
+    `failure_reason` is interpolated into the synthesis prompt and the
+    debug output — a stray newline breaks the prompt structure, an
+    enormous message wastes context. Normalise here so downstream
+    renderers can interpolate without escaping. Plugin and capability
+    names are already restricted to a safe charset at manifest-parse
+    time (see `core/registry.py`), so quoting them is enough.
+    """
+    raw = str(exc)
+    one_line = ' '.join(raw.split()) if raw else ''
+    if len(one_line) > _FAILURE_REASON_MAX_CHARS:
+        one_line = one_line[: _FAILURE_REASON_MAX_CHARS - 1] + '…'
+    return f'plugin {step.plugin!r} capability {step.capability!r} raised {type(exc).__name__}: {one_line}'
+
+
 def _freeze_outputs(outputs: Mapping[str, Mapping[str, object]]) -> Mapping[str, Mapping[str, object]]:
     """Return a read-only snapshot of the executor's output pool.
 
@@ -200,7 +222,7 @@ class DefaultTaskExecutor:
                     plan=plan,
                     outputs=dict(outputs),
                     failed_at_step=step.step,
-                    failure_reason=f'plugin {step.plugin!r} capability {step.capability!r} raised: {exc}',
+                    failure_reason=_format_failure_reason(step, exc),
                 )
 
             if step.outputs_as is not None:

@@ -516,9 +516,35 @@ async def test_plugin_runtime_exception_recorded_as_failure_not_raised() -> None
 
     assert result.failed_at_step == 1
     assert result.failure_reason is not None
-    assert "plugin 'clock' capability 'diff' raised: bad input" in result.failure_reason
+    assert "plugin 'clock' capability 'diff' raised ValueError: bad input" in result.failure_reason
     assert result.outputs == {}
     assert result.halted_at_step is None
+
+
+async def test_plugin_failure_reason_collapses_newlines_and_truncates() -> None:
+    """`failure_reason` is interpolated into the synthesis prompt and debug output.
+
+    PR #17 review (Copilot): a stray newline in the exception message
+    would break prompt structure; an enormous message would burn the
+    context budget. The executor collapses whitespace to a single line
+    and bounds the length before storing the reason on the result.
+    """
+    huge_multiline = 'line one\nline two with\ttabs\nand   spaces\n' + ('x' * 500)
+    plugin = _RaisingPlugin(RuntimeError(huge_multiline))
+    manifest = _manifest('clock', capabilities=(_cap('now'),))
+    executor = _make_executor((manifest, plugin))
+
+    plan = TaskPlan(steps=(PlanStep(step=1, plugin='clock', capability='now', inputs={}, gate='none', outputs_as=None),))
+    result = await executor.execute(plan)
+
+    assert result.failure_reason is not None
+    assert '\n' not in result.failure_reason
+    assert '\t' not in result.failure_reason
+    # Exception type surfaces so the model can distinguish e.g. ValueError
+    # vs TimeoutError without parsing the message body.
+    assert 'RuntimeError' in result.failure_reason
+    # Bounded length so a malicious / runaway exception can't blow up the prompt.
+    assert len(result.failure_reason) < 500
 
 
 async def test_plugin_failure_stops_subsequent_steps_with_partial_outputs() -> None:
