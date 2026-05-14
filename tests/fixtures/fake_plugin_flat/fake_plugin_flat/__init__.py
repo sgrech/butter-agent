@@ -4,6 +4,6 @@ from __future__ import annotations
 
 
 class FlatPlugin:
-    async def execute(self, capability: str, inputs: dict[str, object]) -> dict[str, object]:
-        del inputs
+    async def execute(self, capability: str, inputs: dict[str, object], context: object) -> dict[str, object]:
+        del inputs, context
         return {'reply': f'flat-{capability}'}

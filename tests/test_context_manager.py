@@ -35,7 +35,13 @@ from butter_agent.core.registry import (
 
 
 class _StubPlugin:
-    async def execute(self, capability: str, inputs: dict[str, object]) -> dict[str, object]:
+    async def execute(
+        self,
+        capability: str,
+        inputs: dict[str, object],
+        context: object,
+    ) -> dict[str, object]:
+        del capability, inputs, context
         return {}
 
 

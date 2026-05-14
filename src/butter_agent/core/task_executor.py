@@ -39,6 +39,35 @@ from butter_agent.core.registry import (
     PluginRegistry,
 )
 
+# --- PluginContext ----------------------------------------------------------
+
+
+class _NotYetWiredPluginContext:
+    """Stub `PluginContext` for the initial Plugin Protocol rollout.
+
+    The Plugin Protocol now takes a `context` argument so plugin authors and
+    the executor share a single shape. A real context — one whose `call`
+    method dispatches to internal capabilities — lands in the next slice
+    (task #381 checklist item #393). Until then, the executor still always
+    passes a context (so plugins are written against the final signature),
+    but `call` raises if any plugin actually tries to use it.
+
+    The stub closes over the caller's name so the eventual real context can
+    be a drop-in replacement.
+    """
+
+    __slots__ = ('_caller',)
+
+    def __init__(self, caller: str) -> None:
+        self._caller = caller
+
+    async def call(self, capability: str, inputs: dict[str, object]) -> dict[str, object]:
+        del inputs
+        raise NotImplementedError(
+            f'plugin {self._caller!r} attempted PluginContext.call({capability!r}); plugin-to-plugin calls are not yet wired in this build',
+        )
+
+
 # --- Gate types --------------------------------------------------------------
 
 
@@ -204,8 +233,9 @@ class DefaultTaskExecutor:
 
             resolved_inputs = self._resolve_inputs(step, outputs)
             registered = self._registry.get(step.plugin)
+            context = _NotYetWiredPluginContext(caller=step.plugin)
             try:
-                step_output = await registered.plugin.execute(step.capability, resolved_inputs)
+                step_output = await registered.plugin.execute(step.capability, resolved_inputs, context)
             except ExecutorError:
                 # Don't swallow our own contract errors — those are
                 # programming faults (bad plan validation, missing alias)
@@ -258,6 +288,16 @@ class DefaultTaskExecutor:
                 raise PlanValidationError(f'step {step.step}: {exc}') from exc
             except CapabilityNotFoundError as exc:
                 raise PlanValidationError(f'step {step.step}: {exc}') from exc
+
+            if capability.internal:
+                # Internal capabilities are infrastructure surface (e.g.
+                # database.insert) and are only legal targets of
+                # PluginContext.call. The model must never place them in a
+                # plan — gates and variable-pool semantics don't apply to
+                # internal calls, so accepting them would corrupt both.
+                raise PlanValidationError(
+                    f'step {step.step}: capability {step.plugin}.{step.capability} is internal and cannot appear in a plan (callable only plugin-to-plugin via PluginContext)',
+                )
 
             self._validate_step_inputs(step, capability.input_schema, declared_aliases)
 

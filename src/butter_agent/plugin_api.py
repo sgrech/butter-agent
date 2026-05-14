@@ -42,6 +42,7 @@ from butter_agent.core.registry import (
     CapabilityNotFoundError,
     ManifestError,
     Plugin,
+    PluginContext,
     PluginManifest,
     parse_manifest,
 )
@@ -58,6 +59,7 @@ __all__ = [
     'CapabilityNotFoundError',
     'ManifestError',
     'Plugin',
+    'PluginContext',
     'PluginManifest',
     'parse_manifest',
 ]

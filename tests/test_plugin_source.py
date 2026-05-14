@@ -35,6 +35,14 @@ SRC_FIXTURE = FIXTURES / 'fake_plugin'
 FLAT_FIXTURE = FIXTURES / 'fake_plugin_flat'
 
 
+class _UnusedContext:
+    """Stand-in for a PluginContext when the test just needs a third argument."""
+
+    async def call(self, capability: str, inputs: dict[str, object]) -> dict[str, object]:
+        del capability, inputs
+        raise AssertionError('plugin context should not be used in this test')
+
+
 # --- Stub fetcher -----------------------------------------------------------
 
 
@@ -72,7 +80,7 @@ async def test_loaded_plugin_executes() -> None:
     """Plugin instance returned by the loader is callable as documented."""
     loader = PluginLoader(fetcher=_StubFetcher({}))
     (entry,) = loader.load_all([PluginPath(path=str(SRC_FIXTURE))])
-    result = await entry.plugin.execute('ping', {})
+    result = await entry.plugin.execute('ping', {}, _UnusedContext())
     assert result == {'reply': 'pong'}
 
 
@@ -207,7 +215,7 @@ def test_module_collision_with_sys_modules_rejected(tmp_path: Path, monkeypatch:
     """
     pkg_dir = tmp_path / 'src' / 'colliding_pkg'
     pkg_dir.mkdir(parents=True)
-    (pkg_dir / '__init__.py').write_text('class Plugin:\n    async def execute(self, c, i): return {}\n')
+    (pkg_dir / '__init__.py').write_text('class Plugin:\n    async def execute(self, c, i, ctx): return {}\n')
     (tmp_path / 'manifest.toml').write_text(
         """
 [plugin]

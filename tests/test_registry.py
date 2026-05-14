@@ -18,6 +18,9 @@ from butter_agent.core.registry import (
     PluginRegistry,
     RegistryBuilder,
     RegistryFrozenError,
+    RequiresCycleError,
+    RequiresValidationError,
+    TransitiveBlastRadiusViolation,
     parse_manifest,
     radius_permits,
 )
@@ -28,7 +31,13 @@ class _StubPlugin:
     def __init__(self) -> None:
         self.calls: list[tuple[str, dict[str, object]]] = []
 
-    async def execute(self, capability: str, inputs: dict[str, object]) -> dict[str, object]:
+    async def execute(
+        self,
+        capability: str,
+        inputs: dict[str, object],
+        context: object,
+    ) -> dict[str, object]:
+        del context
         self.calls.append((capability, inputs))
         return {'ok': True}
 
@@ -283,3 +292,187 @@ def test_registry_lookup_misses() -> None:
         registry.get('nope')
     assert 'nope' not in registry
     assert len(registry) == 0
+
+
+# --- Manifest: requires + internal -----------------------------------------
+
+
+_INFRA_TOML = """
+[plugin]
+name = "database"
+version = "0.1.0"
+blast_radius = "local-write"
+entrypoint = "main:Plugin"
+
+[[capability]]
+name = "insert"
+description = "Insert a row"
+input_schema = {}
+output_schema = {}
+internal = true
+
+[[capability]]
+name = "select"
+description = "Read rows"
+input_schema = {}
+output_schema = {}
+internal = true
+"""
+
+
+def _caller_toml(
+    *,
+    name: str = 'notes',
+    radius: str = 'local-write',
+    requires: tuple[str, ...] = ('database.insert', 'database.select'),
+) -> str:
+    requires_line = '' if not requires else 'requires = [' + ', '.join(f'"{r}"' for r in requires) + ']'
+    return f"""
+[plugin]
+name = "{name}"
+version = "0.1.0"
+blast_radius = "{radius}"
+entrypoint = "main:Plugin"
+{requires_line}
+
+[[capability]]
+name = "create"
+description = "Create a note"
+input_schema = {{}}
+output_schema = {{}}
+"""
+
+
+def test_parse_manifest_parses_internal_flag_and_requires() -> None:
+    infra = parse_manifest(_INFRA_TOML)
+    assert all(cap.internal for cap in infra.capabilities)
+    caller = parse_manifest(_caller_toml())
+    assert caller.requires == ('database.insert', 'database.select')
+    assert all(not cap.internal for cap in caller.capabilities)
+
+
+def test_parse_manifest_requires_default_is_empty() -> None:
+    manifest = parse_manifest(_valid_toml())
+    assert manifest.requires == ()
+
+
+def test_parse_manifest_rejects_non_string_requires_entry() -> None:
+    with pytest.raises(ManifestError, match='requires'):
+        parse_manifest(_caller_toml(requires=('database',)))  # missing capability
+
+
+def test_parse_manifest_rejects_malformed_requires_ref() -> None:
+    with pytest.raises(ManifestError, match=r'plugin\.capability'):
+        parse_manifest(_caller_toml(requires=('Database.Insert',)))
+
+
+def test_parse_manifest_rejects_duplicate_requires() -> None:
+    with pytest.raises(ManifestError, match='duplicate requires'):
+        parse_manifest(_caller_toml(requires=('database.insert', 'database.insert')))
+
+
+def test_parse_manifest_rejects_non_bool_internal() -> None:
+    bad = _INFRA_TOML.replace('internal = true', 'internal = "yes"')
+    with pytest.raises(ManifestError, match='internal'):
+        parse_manifest(bad)
+
+
+# --- Builder: requires + transitive radius ---------------------------------
+
+
+def test_builder_accepts_well_formed_requires_graph() -> None:
+    builder = RegistryBuilder(max_blast_radius=BlastRadius.NETWORK)
+    builder.register(parse_manifest(_INFRA_TOML), _StubPlugin())
+    builder.register(parse_manifest(_caller_toml()), _StubPlugin())
+    registry = builder.build()
+    assert registry.get('notes').manifest.requires == ('database.insert', 'database.select')
+
+
+def test_builder_rejects_requires_pointing_at_unknown_plugin() -> None:
+    builder = RegistryBuilder(max_blast_radius=BlastRadius.NETWORK)
+    builder.register(parse_manifest(_caller_toml(requires=('ghost.insert',))), _StubPlugin())
+    with pytest.raises(RequiresValidationError, match='unknown plugin'):
+        builder.build()
+
+
+def test_builder_rejects_requires_pointing_at_unknown_capability() -> None:
+    builder = RegistryBuilder(max_blast_radius=BlastRadius.NETWORK)
+    builder.register(parse_manifest(_INFRA_TOML), _StubPlugin())
+    builder.register(parse_manifest(_caller_toml(requires=('database.drop_table',))), _StubPlugin())
+    with pytest.raises(RequiresValidationError, match='no capability'):
+        builder.build()
+
+
+def test_builder_rejects_requires_pointing_at_non_internal_capability() -> None:
+    """requires may only target internal capabilities — the firewall is strict."""
+    builder = RegistryBuilder(max_blast_radius=BlastRadius.NETWORK)
+    # A user-facing plugin that exposes `create` (non-internal).
+    builder.register(parse_manifest(_caller_toml(name='notes', requires=())), _StubPlugin())
+    # Another plugin tries to call notes.create plugin-to-plugin.
+    bad = _caller_toml(name='reminder', requires=('notes.create',))
+    builder.register(parse_manifest(bad), _StubPlugin())
+    with pytest.raises(RequiresValidationError, match='non-internal'):
+        builder.build()
+
+
+def test_builder_rejects_self_requires() -> None:
+    builder = RegistryBuilder(max_blast_radius=BlastRadius.NETWORK)
+    builder.register(parse_manifest(_caller_toml(requires=('notes.create',))), _StubPlugin())
+    with pytest.raises(RequiresValidationError, match='points at itself'):
+        builder.build()
+
+
+def test_builder_rejects_cycle_in_requires() -> None:
+    a_toml = """
+[plugin]
+name = "alpha"
+version = "0.1.0"
+blast_radius = "local-write"
+entrypoint = "main:Plugin"
+requires = ["beta.bar"]
+
+[[capability]]
+name = "foo"
+description = "Foo"
+input_schema = {}
+output_schema = {}
+internal = true
+"""
+    b_toml = """
+[plugin]
+name = "beta"
+version = "0.1.0"
+blast_radius = "local-write"
+entrypoint = "main:Plugin"
+requires = ["alpha.foo"]
+
+[[capability]]
+name = "bar"
+description = "Bar"
+input_schema = {}
+output_schema = {}
+internal = true
+"""
+    builder = RegistryBuilder(max_blast_radius=BlastRadius.NETWORK)
+    builder.register(parse_manifest(a_toml), _StubPlugin())
+    builder.register(parse_manifest(b_toml), _StubPlugin())
+    with pytest.raises(RequiresCycleError, match='alpha'):
+        builder.build()
+
+
+def test_builder_rejects_declared_radius_below_transitive_max() -> None:
+    """A read-only plugin cannot transitively reach a local-write capability."""
+    builder = RegistryBuilder(max_blast_radius=BlastRadius.NETWORK)
+    builder.register(parse_manifest(_INFRA_TOML), _StubPlugin())  # local-write
+    bad = _caller_toml(name='reader', radius='read-only', requires=('database.insert',))
+    builder.register(parse_manifest(bad), _StubPlugin())
+    with pytest.raises(TransitiveBlastRadiusViolation, match='read-only'):
+        builder.build()
+
+
+def test_builder_accepts_declared_radius_equal_to_transitive_max() -> None:
+    builder = RegistryBuilder(max_blast_radius=BlastRadius.NETWORK)
+    builder.register(parse_manifest(_INFRA_TOML), _StubPlugin())  # local-write
+    builder.register(parse_manifest(_caller_toml(radius='local-write')), _StubPlugin())
+    registry = builder.build()
+    assert 'notes' in registry

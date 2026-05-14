@@ -99,7 +99,13 @@ class _RecordingClockPlugin:
     def __init__(self) -> None:
         self.calls: list[tuple[str, dict[str, object]]] = []
 
-    async def execute(self, capability: str, inputs: dict[str, object]) -> dict[str, object]:
+    async def execute(
+        self,
+        capability: str,
+        inputs: dict[str, object],
+        context: object,
+    ) -> dict[str, object]:
+        del context
         self.calls.append((capability, dict(inputs)))
         if capability == 'now':
             return {'time': '2026-05-14T15:00:00+02:00', 'tz': 'CEST'}

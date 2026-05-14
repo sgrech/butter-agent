@@ -40,7 +40,13 @@ class _RecordingPlugin:
     responses: dict[str, dict[str, object]]
     calls: list[tuple[str, dict[str, object]]] = field(default_factory=list)
 
-    async def execute(self, capability: str, inputs: dict[str, object]) -> dict[str, object]:
+    async def execute(
+        self,
+        capability: str,
+        inputs: dict[str, object],
+        context: object,
+    ) -> dict[str, object]:
+        del context
         self.calls.append((capability, dict(inputs)))
         return dict(self.responses.get(capability, {}))
 
@@ -60,12 +66,19 @@ def _manifest(
     )
 
 
-def _cap(name: str, input_schema: dict[str, object] | None = None, output_schema: dict[str, object] | None = None) -> Capability:
+def _cap(
+    name: str,
+    input_schema: dict[str, object] | None = None,
+    output_schema: dict[str, object] | None = None,
+    *,
+    internal: bool = False,
+) -> Capability:
     return Capability(
         name=name,
         description=f'{name} capability',
         input_schema=input_schema or {},
         output_schema=output_schema or {},
+        internal=internal,
     )
 
 
@@ -235,6 +248,62 @@ async def test_validation_rejects_empty_plan() -> None:
     executor = _make_executor()
     with pytest.raises(PlanValidationError, match='no steps'):
         await executor.execute(TaskPlan(steps=()))
+
+
+async def test_executor_passes_plugin_context_to_execute() -> None:
+    """Every `execute` call gets a PluginContext whose call() exists.
+
+    The stub context raises if actually used (real wiring lands in slice 2),
+    but the Plugin Protocol is now three-arg and the executor must comply.
+    """
+
+    captured: list[object] = []
+
+    class _ContextCapturingPlugin:
+        async def execute(
+            self,
+            capability: str,
+            inputs: dict[str, object],
+            context: object,
+        ) -> dict[str, object]:
+            del capability, inputs
+            captured.append(context)
+            return {}
+
+    manifest = _manifest('notes', capabilities=(_cap('create'),))
+    executor = _make_executor((manifest, _ContextCapturingPlugin()))
+    plan = TaskPlan(
+        steps=(PlanStep(step=1, plugin='notes', capability='create', inputs={}, gate='none'),),
+    )
+    await executor.execute(plan)
+    assert len(captured) == 1
+    ctx = captured[0]
+    assert hasattr(ctx, 'call')
+
+
+async def test_validation_rejects_plans_naming_internal_capability() -> None:
+    """The model must never place an internal capability in a plan.
+
+    Gates and variable-pool semantics don't apply to internal calls, so the
+    only legal way to reach them is `PluginContext.call` from within another
+    plugin. A plan that names one is malformed regardless of how it got
+    emitted.
+    """
+    db = _RecordingPlugin(responses={'insert': {'id': 1}})
+    manifest = _manifest(
+        'database',
+        radius=BlastRadius.LOCAL_WRITE,
+        capabilities=(_cap('insert', input_schema={'row': 'object'}, internal=True),),
+    )
+    executor = _make_executor((manifest, db))
+
+    plan = TaskPlan(
+        steps=(PlanStep(step=1, plugin='database', capability='insert', inputs={'row': {}}, gate='none'),),
+    )
+    with pytest.raises(PlanValidationError, match='internal'):
+        await executor.execute(plan)
+    # And the plugin was never invoked.
+    assert db.calls == []
 
 
 # --- Variable resolution (invariant #4) -------------------------------------
@@ -492,7 +561,13 @@ class _RaisingPlugin:
     def __init__(self, exc: Exception) -> None:
         self._exc = exc
 
-    async def execute(self, capability: str, inputs: dict[str, object]) -> dict[str, object]:
+    async def execute(
+        self,
+        capability: str,
+        inputs: dict[str, object],
+        context: object,
+    ) -> dict[str, object]:
+        del capability, inputs, context
         raise self._exc
 
 
