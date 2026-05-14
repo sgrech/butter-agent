@@ -258,6 +258,18 @@ def _import_entrypoint(plugin_dir: Path, manifest: PluginManifest) -> Plugin:
         raise PluginLoadError(
             f'plugin {manifest.name!r}: {manifest.entrypoint}.execute must be `async def` — synchronous execute methods are not supported by the Plugin Protocol',
         )
+    # The Plugin Protocol takes three arguments after `self`:
+    # `(capability, inputs, context)`. A legacy plugin written against the
+    # old two-arg signature would import successfully and only crash on the
+    # first plan step with a TypeError — surface that as a load-time error
+    # so the operator can pin or update the plugin before booting.
+    expected_params = 3  # capability, inputs, context (excluding self)
+    sig = inspect.signature(execute)
+    actual_params = len(sig.parameters)
+    if actual_params != expected_params:
+        raise PluginLoadError(
+            f'plugin {manifest.name!r}: {manifest.entrypoint}.execute must accept (capability, inputs, context) — got {actual_params} positional parameter(s). This plugin is likely written against an older Plugin Protocol version.',
+        )
     # Structural Plugin Protocol — cast through `object` to satisfy mypy
     # since `cls()` returned `Any`. The runtime hasattr check above is the
     # actual contract gate.

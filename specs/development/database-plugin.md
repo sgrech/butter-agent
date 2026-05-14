@@ -26,7 +26,7 @@ Provide a capability-mediated shared SQLite store so write-plugins (notes, futur
 
 ## 3. User Stories
 
-- As a plugin author, I want to declare `requires: [database]` in my manifest and get a typed client so I can persist state without managing SQLite myself.
+- As a plugin author, I want to declare e.g. `requires = ["database.define_table", "database.insert", "database.select"]` in my manifest and reach SQLite through `ctx.call(...)` so I can persist state without managing connections myself.
 - As a butter-agent user, I want all local writes from all plugins in one inspectable file so I can back up or wipe butter-agent state in one move.
 - As a butter-agent operator, I want plugins to be unable to read each other's rows under any circumstance so installing a third-party plugin can never exfiltrate data from another plugin.
 
@@ -50,15 +50,15 @@ Per-call namespace is derived from the caller's plugin name at the registry/exec
 
 ## 5. API Surface
 
-All capabilities are flagged `internal: true` — invisible to the planner, callable only by other plugin handlers via the injected client.
+All capabilities are flagged `internal: true` — invisible to the planner, callable only by other plugin handlers via `PluginContext.call`. The plugin-level `blast_radius = "local-write"` covers the strictest tier reached by any capability; the manifest schema does not (yet) support per-capability blast radii, so reads inherit the plugin value.
 
-| Capability | Inputs | Outputs | blast_radius | gate | Notes |
-|------------|--------|---------|--------------|------|-------|
-| `database.define_table` | `name: str`, `columns: dict[str, ColumnSpec]` | `{table: str}` | `local-write` | none | Idempotent. Returns the fully-qualified table name. |
-| `database.insert` | `table: str`, `row: dict` | `{id: int}` | `local-write` | none | Gate sits on the calling capability (e.g. `notes.create`), not here. |
-| `database.select` | `table: str`, `where?: dict`, `limit?: int`, `order_by?: str` | `{rows: list[dict]}` | `read-only` | none | `where` is equality-only for v1. |
-| `database.update` | `table: str`, `where: dict`, `set: dict` | `{updated: int}` | `local-write` | none | Same gate-on-caller rule. |
-| `database.delete` | `table: str`, `where: dict` | `{deleted: int}` | `local-write` | none | Same gate-on-caller rule. |
+| Capability | Inputs | Outputs | Notes |
+|------------|--------|---------|-------|
+| `database.define_table` | `name: str`, `columns: dict[str, ColumnSpec]` | `{table: str}` | Idempotent. Returns the fully-qualified table name. |
+| `database.insert` | `table: str`, `row: dict` | `{id: int}` | Gate sits on the calling capability (e.g. `notes.create`), not here. |
+| `database.select` | `table: str`, `where?: dict`, `limit?: int`, `order_by?: str` | `{rows: list[dict]}` | `where` is equality-only for v1. |
+| `database.update` | `table: str`, `where: dict`, `set: dict` | `{updated: int}` | Same gate-on-caller rule. |
+| `database.delete` | `table: str`, `where: dict` | `{deleted: int}` | Same gate-on-caller rule. |
 
 `ColumnSpec` (v1, minimal):
 
@@ -83,7 +83,7 @@ Gates are enforced at the task-plan step level. `database.insert` is never a pla
 2. Manifests gain capability-granular `requires` (e.g. `requires = ["database.insert", "database.select"]`) and per-capability `internal: bool`. Only `internal: true` capabilities are legal targets of `requires`.
 3. `RegistryBuilder.build()` topo-sorts plugins by `requires`, rejects cycles, and validates each non-internal capability's declared blast radius covers the transitive union of its reachable internal capabilities' radii.
 4. At step execution the task executor constructs a `PluginContext` whose `.call(capability, args)` is restricted to the caller's `requires` set and whose caller identity is closed over (sourced from the registry, never from arguments).
-5. Inside the database plugin, `ctx.call("database.insert", {"table": "entries", ...})` becomes a write to `notes__entries`. The plugin sees only the fully-qualified table name; namespace prefixing happens in `PluginContext` construction. Any caller-supplied table name containing `__` is rejected.
+5. Inside a calling plugin (e.g. `notes`), `await ctx.call("database.insert", {"table": "entries", ...})` is rewritten by `PluginContext` into a `database.insert` invocation against `notes__entries`. The database plugin handler sees only the fully-qualified table name; namespace prefixing happens in `PluginContext` construction. Any caller-supplied table name containing `__` is rejected.
 
 **Hard namespace isolation:**
 

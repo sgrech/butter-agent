@@ -356,9 +356,30 @@ def test_parse_manifest_requires_default_is_empty() -> None:
     assert manifest.requires == ()
 
 
-def test_parse_manifest_rejects_non_string_requires_entry() -> None:
+def test_parse_manifest_rejects_unqualified_requires_entry() -> None:
+    """A bare plugin name (missing `.capability`) is rejected by the format check."""
     with pytest.raises(ManifestError, match='requires'):
-        parse_manifest(_caller_toml(requires=('database',)))  # missing capability
+        parse_manifest(_caller_toml(requires=('database',)))
+
+
+def test_parse_manifest_rejects_non_string_requires_entry() -> None:
+    """A non-string `requires` element fails the format check the same way."""
+    bad = """
+[plugin]
+name = "notes"
+version = "0.1.0"
+blast_radius = "local-write"
+entrypoint = "main:Plugin"
+requires = [42]
+
+[[capability]]
+name = "create"
+description = "Create a note"
+input_schema = {}
+output_schema = {}
+"""
+    with pytest.raises(ManifestError, match='requires'):
+        parse_manifest(bad)
 
 
 def test_parse_manifest_rejects_malformed_requires_ref() -> None:
@@ -458,6 +479,71 @@ internal = true
     builder.register(parse_manifest(b_toml), _StubPlugin())
     with pytest.raises(RequiresCycleError, match='alpha'):
         builder.build()
+
+
+def test_cycle_error_excludes_innocent_downstream_plugins() -> None:
+    """The cycle error names only true cycle members, not their downstream.
+
+    With alpha ⇄ beta forming the cycle and gamma depending on alpha,
+    gamma is stuck in topo-sort but is *not* part of the cycle. The
+    error must point at alpha+beta only — naming gamma would mislead
+    a plugin author into hunting their own manifest for a non-existent
+    cycle.
+    """
+    a = """
+[plugin]
+name = "alpha"
+version = "0.1.0"
+blast_radius = "local-write"
+entrypoint = "main:Plugin"
+requires = ["beta.bar"]
+
+[[capability]]
+name = "foo"
+description = "Foo"
+input_schema = {}
+output_schema = {}
+internal = true
+"""
+    b = """
+[plugin]
+name = "beta"
+version = "0.1.0"
+blast_radius = "local-write"
+entrypoint = "main:Plugin"
+requires = ["alpha.foo"]
+
+[[capability]]
+name = "bar"
+description = "Bar"
+input_schema = {}
+output_schema = {}
+internal = true
+"""
+    g = """
+[plugin]
+name = "gamma"
+version = "0.1.0"
+blast_radius = "local-write"
+entrypoint = "main:Plugin"
+requires = ["alpha.foo"]
+
+[[capability]]
+name = "use"
+description = "Use alpha"
+input_schema = {}
+output_schema = {}
+"""
+    builder = RegistryBuilder(max_blast_radius=BlastRadius.NETWORK)
+    builder.register(parse_manifest(a), _StubPlugin())
+    builder.register(parse_manifest(b), _StubPlugin())
+    builder.register(parse_manifest(g), _StubPlugin())
+    with pytest.raises(RequiresCycleError) as info:
+        builder.build()
+    message = str(info.value)
+    assert 'alpha' in message
+    assert 'beta' in message
+    assert 'gamma' not in message
 
 
 def test_builder_rejects_declared_radius_below_transitive_max() -> None:

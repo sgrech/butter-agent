@@ -2,15 +2,15 @@
 
 ## 1. Purpose
 
-{2-3 sentences describing why this feature exists and what problem it solves. Frame it from the user's perspective.}
+Notes is butter-agent's first `local-write` plugin: persistent free-form note capture from the REPL. It exists to prove the gate-handler `confirm` path end-to-end against a real model-emitted plan, to exercise the agent-mediated variable-pool data channel via `clock.now → notes.create`, and to serve as the worked example future write-plugins copy.
 
 ## 2. Scope
 
 ### In Scope
 
-- Notes plugin capability surface (create / list / read / ?delete)
-- Persistence model — does the plugin own its own SQLite store, or share `Database` with core?
-- Manifest declaration: inputs, outputs, `blast_radius=local-write`, gate strategy
+- Notes plugin capability surface (`create` / `list` / `read`)
+- Persistence via the `database` plugin (see `database-plugin.md`) — namespace-isolated to `notes__entries`
+- Manifest declaration: plugin-level `blast_radius=local-write`, `requires = ["database.define_table", "database.insert", "database.select"]`, per-capability `gate`
 - Live exercise of the gate-handler `confirm` path against a real model-emitted plan
 - Integration with `clock` plugin for chained plans (`clock.now → notes.create` using `$t.time`)
 
@@ -34,26 +34,25 @@
 | content | text | not null | Note body |
 | created_at | datetime | not null, default now | Creation timestamp |
 
-Open question: schema lives in plugin-owned SQLite file under e.g. `~/.butter-agent/plugins/notes.db`, OR in a shared `Database` injected by core. Decide in §6.
+Schema lives in the shared `database` plugin under the namespaced table `notes__entries`. The notes plugin never sees raw SQL; it calls `ctx.call("database.define_table", ...)` once and `ctx.call("database.insert" | "database.select", ...)` for writes/reads. See `database-plugin.md` for the namespace-isolation rules.
 
 ## 5. API Surface
 
 ### Capabilities
 
-| Capability | Inputs | Outputs | blast_radius | gate |
-|------------|--------|---------|--------------|------|
-| `notes.create` | `content: str` | `note_id: int`, `created_at: str` | `local-write` | `confirm` |
-| `notes.list` | `limit?: int` | `notes: list[{id, content, created_at}]` | `read-only` | none |
-| `notes.read` | `note_id: int` | `content: str`, `created_at: str` | `read-only` | none |
+Plugin-level `blast_radius = "local-write"` (the strictest tier required across the plugin's write capabilities; reads inherit the plugin-level value — there is no per-capability blast radius in the manifest schema today). Per-capability `gate` is declared by the planner per plan step; the values below are the recommended defaults the model should emit.
+
+| Capability | Inputs | Outputs | gate (recommended) |
+|------------|--------|---------|--------------------|
+| `notes.create` | `content: str` | `note_id: int`, `created_at: str` | `confirm` |
+| `notes.list` | `limit?: int` | `notes: list[{id, content, created_at}]` | `none` |
+| `notes.read` | `note_id: int` | `content: str`, `created_at: str` | `none` |
 
 ## 6. Interactions
 
 - Task executor enforces the `confirm` gate before invoking `notes.create`; REPL renders the prompt (already wired in PR #18).
 - Variable pool: `notes.create` accepts `$t.time` from a prior `clock.now` step — exercises plan-level `$variable` resolution end-to-end with a real write.
-- **Decision required:** Database ownership.
-  - Option A — plugin owns its SQLite file under XDG data dir. Pro: blast-radius isolation, no shared schema migrations. Con: every write-plugin re-implements connection lifecycle.
-  - Option B — core exposes a `Database` capability plugins request in their manifest. Pro: shared lifecycle, single backup target. Con: weakens "plugins cannot read each other's internal state" invariant unless namespaced.
-  - Recommend A for v1; revisit when second write-plugin lands.
+- Persistence: notes calls into `database` via `PluginContext.call`. The namespace is closed over by the executor (always `notes`); notes cannot read or write any other plugin's tables. Cross-plugin data flow remains agent-mediated via the variable pool.
 
 ## 7. Migration Strategy
 

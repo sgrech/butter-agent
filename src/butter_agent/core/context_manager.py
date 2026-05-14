@@ -246,6 +246,13 @@ def _all_descriptors(registry: PluginRegistry) -> tuple[CapabilityDescriptor, ..
     for name in registry.names():
         manifest = registry.get(name).manifest
         for cap in manifest.capabilities:
+            if cap.internal:
+                # Internal capabilities are infrastructure surface
+                # reachable only via PluginContext.call. Surfacing them
+                # in the planner menu would let the model emit plans
+                # the executor must then reject — wasted tokens and a
+                # confusing error path. Filter at the source.
+                continue
             descriptors.append(
                 CapabilityDescriptor(
                     plugin=name,

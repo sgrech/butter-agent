@@ -180,6 +180,38 @@ output_schema = {}
         loader.load_all([PluginPath(path=str(tmp_path))])
 
 
+def test_legacy_two_arg_execute_rejected_at_load_time(tmp_path: Path) -> None:
+    """A plugin written against the old 2-arg Protocol must fail at load, not runtime.
+
+    Without this guard, the plugin imports cleanly and the operator only
+    discovers the mismatch on the first plan step that hits this plugin,
+    long after startup. Surface it at load time with a clear message.
+    """
+    pkg_dir = tmp_path / 'src' / 'mod_legacy_signature'
+    pkg_dir.mkdir(parents=True)
+    (pkg_dir / '__init__.py').write_text(
+        'class Plugin:\n    async def execute(self, capability, inputs):\n        return {}\n',
+    )
+    (tmp_path / 'manifest.toml').write_text(
+        """
+[plugin]
+name = "legacy"
+version = "0.1.0"
+entrypoint = "mod_legacy_signature:Plugin"
+blast_radius = "read-only"
+
+[[capability]]
+name = "x"
+description = "x"
+input_schema = {}
+output_schema = {}
+""",
+    )
+    loader = PluginLoader(fetcher=_StubFetcher({}))
+    with pytest.raises(PluginLoadError, match='capability, inputs, context'):
+        loader.load_all([PluginPath(path=str(tmp_path))])
+
+
 def test_sync_execute_rejected_at_load_time(tmp_path: Path) -> None:
     """A non-async `execute` would only blow up at first call — catch it early."""
     pkg_dir = tmp_path / 'src' / 'mod_sync_execute'

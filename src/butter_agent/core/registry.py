@@ -478,10 +478,37 @@ class RegistryBuilder:
                     ready.append(dependent)
 
         if resolved != len(self._entries):
-            stuck = sorted(name for name, count in unresolved.items() if count > 0)
+            stuck = {name for name, count in unresolved.items() if count > 0}
+            cycle_members = self._narrow_to_cycle_members(stuck)
             raise RequiresCycleError(
-                f'requires graph contains a cycle involving: {", ".join(stuck)}',
+                f'requires graph contains a cycle involving: {", ".join(sorted(cycle_members))}',
             )
+
+    def _narrow_to_cycle_members(self, stuck: set[str]) -> set[str]:
+        """Narrow `stuck` to plugins actually on a cycle, not their downstream.
+
+        A plugin appears in `stuck` if Kahn's algorithm couldn't process it,
+        which catches both true cycle members and plugins that merely depend
+        on a cycle. Reporting both as "involved in a cycle" misleads
+        debugging.
+
+        Iteratively prune any node with no incoming edges from another stuck
+        node — those are downstream-of-cycle (they failed only because
+        something they depend on is stuck, but nothing in the stuck set
+        depends on them). Whatever survives is genuinely on a cycle.
+        """
+        remaining = set(stuck)
+        while True:
+            referenced: set[str] = set()
+            for caller in remaining:
+                for ref in self._entries[caller].manifest.requires:
+                    target = ref.split('.', 1)[0]
+                    if target in remaining:
+                        referenced.add(target)
+            pruned = remaining & referenced
+            if pruned == remaining:
+                return remaining
+            remaining = pruned
 
     def _validate_transitive_blast_radius(self) -> None:
         """A plugin's declared radius must cover the radius reachable via `requires`."""
