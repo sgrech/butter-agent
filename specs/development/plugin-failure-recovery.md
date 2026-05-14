@@ -126,17 +126,20 @@ actually common.
   (a) under "Alias persistence across turns" above: surfacing prior
   outputs as values in history is sufficient; a cross-turn `$$alias`
   syntax may not be needed at all.
-- **Timezone-offset stripping when transcribing values.** In the same
+- **Timezone-offset stripping when transcribing values.** ~~In the same
   turn 3, the model dropped the `+02:00` and `+10:00` offsets when
-  copying timestamps from history (rendered as e.g.
-  `'2026-05-14T15:12:18.754479+02:00'`) into `clock.diff` inputs
-  (received as `'2026-05-14T15:12:18.754479'`). `clock.diff` then did
-  naive subtraction and returned `8h 20s` — which is wall-clock skew,
-  not absolute-time distance (the two moments are the same UTC
-  instant, true diff is 0). Likely fix lives in the synthesis system
-  prompt: "when quoting values from prior outputs in a new plan's
-  inputs, use the value verbatim — do not reformat or strip fields."
-  Park for now; the synthesis-on-failure work is unblocked by it.
+  copying timestamps from history…~~ **Addressed** on
+  `feat/repl-prompt-toolkit`: synthesis system prompt gained a clause
+  requiring tool-output values to be reproduced verbatim, including
+  timezone offsets, fractional seconds, and any other suffix. The
+  model paraphrases the same value in parentheses if it wants a
+  friendlier form. Pinned by
+  `test_synthesis_system_prompt_requires_verbatim_value_quoting`. The
+  real test is live-REPL — re-run the
+  here-vs-Australia diff after this lands. If the stripped form
+  returns, the next step is to render *raw plugin outputs* into
+  conversation history rather than just the synthesis text, so the
+  model can copy from a non-paraphrased source.
 
 ## Out of scope
 

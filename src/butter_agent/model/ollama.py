@@ -244,6 +244,15 @@ short, natural-language answer to the user's original request, grounded
 in the tool results. Quote concrete values from the outputs where they
 help; convert units or timezones if the user asked for that.
 
+When you quote a value that came directly from a tool output (a
+timestamp, an ID, a filename, a numeric measurement), reproduce it
+verbatim — including timezone offsets like `+02:00`, fractional
+seconds, and any other suffix the tool emitted. The user's next turn
+may reuse these values in a follow-up plan, and a stripped or
+reformatted value will round-trip incorrectly. If you want to express
+the same value in a friendlier form, quote the original first, then
+add the rephrasing in parentheses.
+
 If a step is marked "FAILED" in the tool results, acknowledge the
 failure plainly in your reply — say which step failed and why. Do not
 invent successful outputs for it. If earlier steps in the plan

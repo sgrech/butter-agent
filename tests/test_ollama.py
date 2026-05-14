@@ -592,6 +592,25 @@ async def test_synthesis_marks_failed_step_and_following_steps() -> None:
     assert 'step 3: clock.now → $t2 — did not run (prior step failed)' in user_msg
 
 
+async def test_synthesis_system_prompt_requires_verbatim_value_quoting() -> None:
+    """Synthesis must preserve tool-output values verbatim when quoting them.
+
+    Live-REPL on 2026-05-14 showed qwen3:8b paraphrasing
+    `'2026-05-14T15:12:18+02:00'` into `'2026-05-14T15:12:18'` (offset
+    stripped) in its reply. That reply then surfaced in the next turn's
+    history; the model copied the stripped value into a new
+    `clock.diff` plan and the diff returned wall-clock skew instead of
+    absolute-time distance. See
+    `specs/development/plugin-failure-recovery.md` ("Known limitations").
+    Pin the prompt clause so a future edit cannot quietly drop it.
+    """
+    client, transport = _client(_ollama_response({'type': 'reply', 'text': 'ok'}))
+    await client.generate(_ctx('q', execution=_execution_result()))
+    folded = _system_prompt(transport)
+    assert 'reproduce it verbatim' in folded
+    assert 'timezone offsets' in folded
+
+
 async def test_synthesis_system_prompt_acknowledges_failed_steps() -> None:
     """Synthesis prompt instructs the model to acknowledge FAILED steps."""
     client, transport = _client(_ollama_response({'type': 'reply', 'text': 'ok'}))

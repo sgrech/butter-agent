@@ -278,6 +278,42 @@ async def test_repl_writes_banner_before_first_prompt() -> None:
     assert out.chunks[0] == 'hello\n'
 
 
+async def test_gate_handler_pauses_and_resumes_active_indicator() -> None:
+    """PR #18 review (Copilot): the spinner kept animating during gate prompts.
+
+    Fix: `ReplGateHandler.on_gate` wraps its prompt in
+    `suspend_indicator()`, which pauses any registered
+    `IndicatorControl` for the duration. This test registers a
+    recording indicator via the same contextvar API used by
+    `InferenceIndicator` and asserts pause/resume fire exactly once
+    around the gate interaction.
+    """
+    from butter_agent.core.repl import register_active_indicator, unregister_active_indicator
+
+    @dataclass
+    class _RecordingIndicator:
+        pauses: int = 0
+        resumes: int = 0
+
+        def pause(self) -> None:
+            self.pauses += 1
+
+        def resume(self) -> None:
+            self.resumes += 1
+
+    indicator = _RecordingIndicator()
+    token = register_active_indicator(indicator)
+    try:
+        inp = _ScriptedInput(lines=deque(['y']))
+        out = _CapturingOutput()
+        await ReplGateHandler(inp, out).on_gate(_step(), Gate.CONFIRM, {})
+    finally:
+        unregister_active_indicator(token)
+
+    assert indicator.pauses == 1
+    assert indicator.resumes == 1
+
+
 # --- ReplGateHandler ---------------------------------------------------------
 
 
@@ -375,3 +411,61 @@ def test_stdio_output_writes_and_flushes() -> None:
     StdioOutput(stream=stream).write('hello')  # type: ignore[arg-type]
     assert stream.buf == ['hello']
     assert stream.flushes == 1
+
+
+# --- indicator_factory seam -------------------------------------------------
+
+
+async def test_repl_calls_indicator_factory_around_each_turn() -> None:
+    """Each non-command turn must enter the indicator context once.
+
+    The indicator is the seam prompt_toolkit's spinner hangs off; tests
+    inject a recording stub so the wiring can be verified without
+    pulling a TTY into the test environment.
+    """
+    enter_count = 0
+    exit_count = 0
+
+    class _RecordingIndicator:
+        async def __aenter__(self) -> _RecordingIndicator:
+            nonlocal enter_count
+            enter_count += 1
+            return self
+
+        async def __aexit__(self, *_: object) -> None:
+            nonlocal exit_count
+            exit_count += 1
+
+    loop, _, _ = _wire(model_outputs=[ModelReply(text='ok')])
+    inp = _ScriptedInput(lines=deque(['ping']))
+    out = _CapturingOutput()
+    await Repl(loop, inp, out, banner='', indicator_factory=_RecordingIndicator).run()
+
+    assert enter_count == 1
+    assert exit_count == 1
+
+
+async def test_repl_indicator_not_invoked_on_blank_input_or_commands() -> None:
+    """Blank lines and slash commands skip the indicator — no inference happens.
+
+    The indicator wraps `AgentLoop.run_turn` only. Slash commands are
+    dispatched locally and blank lines are dropped before any model
+    call, so neither should spin up the spinner.
+    """
+    calls = 0
+
+    class _CountingIndicator:
+        async def __aenter__(self) -> _CountingIndicator:
+            nonlocal calls
+            calls += 1
+            return self
+
+        async def __aexit__(self, *_: object) -> None:
+            return None
+
+    loop, _, _ = _wire(model_outputs=[])
+    inp = _ScriptedInput(lines=deque(['', '   ', '/unknown']))
+    out = _CapturingOutput()
+    await Repl(loop, inp, out, banner='', indicator_factory=_CountingIndicator).run()
+
+    assert calls == 0

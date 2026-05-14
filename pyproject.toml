@@ -6,7 +6,9 @@ readme = 'README.md'
 requires-python = '>=3.12'
 license = { text = 'MIT' }
 authors = [{ name = 'Shane Grech' }]
-dependencies = []
+dependencies = [
+    "prompt-toolkit>=3.0.52",
+]
 
 [project.scripts]
 butter = 'butter_agent.cli:main'
@@ -51,5 +53,10 @@ warn_redundant_casts = true
 
 [tool.pytest.ini_options]
 testpaths = ['tests']
-addopts = '-ra --strict-markers'
+# `-m "not live"` excludes the live-Ollama integration suite by default.
+# Run it explicitly with `uv run pytest -m live` against your homelab.
+addopts = '-ra --strict-markers -m "not live"'
 asyncio_mode = 'auto'
+markers = [
+    'live: integration tests that hit a live Ollama instance — excluded from the default run',
+]

@@ -23,7 +23,9 @@ from __future__ import annotations
 
 import os
 import sys
-from collections.abc import Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
+from contextlib import AbstractAsyncContextManager, asynccontextmanager, nullcontext
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Protocol, TextIO
 
@@ -63,6 +65,56 @@ class Output(Protocol):
     """
 
     def write(self, text: str) -> None: ...
+
+
+class IndicatorControl(Protocol):
+    """The pause/resume surface of a running inference indicator.
+
+    Lives in core so that any code that takes over the terminal (gate
+    handler today; future progress-bar plugins, interactive editors)
+    can suspend the indicator without depending on the concrete
+    `InferenceIndicator` implementation in `repl_prompt_toolkit`.
+    """
+
+    def pause(self) -> None: ...
+
+    def resume(self) -> None: ...
+
+
+_active_indicator: ContextVar[IndicatorControl | None] = ContextVar('butter_agent_active_indicator', default=None)
+
+
+def register_active_indicator(indicator: IndicatorControl) -> object:
+    """Mark `indicator` as the active one for `suspend_indicator()`.
+
+    Called by `InferenceIndicator.__aenter__`. Returns a token to pass
+    to `unregister_active_indicator` for the matching reset.
+    """
+    return _active_indicator.set(indicator)
+
+
+def unregister_active_indicator(token: object) -> None:
+    """Counterpart to `register_active_indicator`. Restores the prior value."""
+    _active_indicator.reset(token)  # type: ignore[arg-type]
+
+
+@asynccontextmanager
+async def suspend_indicator() -> AsyncIterator[None]:
+    """Pause the currently active inference indicator for the body.
+
+    No-op when no indicator is registered (tests, non-TTY runs). The
+    gate handler wraps its prompt in this so the spinner doesn't keep
+    drawing "thinking…" frames while the REPL is actually blocked on
+    a y/N answer.
+    """
+    indicator = _active_indicator.get()
+    if indicator is not None:
+        indicator.pause()
+    try:
+        yield
+    finally:
+        if indicator is not None:
+            indicator.resume()
 
 
 class StdioInputSource:
@@ -178,21 +230,27 @@ class ReplGateHandler:
         effective_gate: Gate,
         prior_outputs: Mapping[str, Mapping[str, object]],
     ) -> GateDecision:
-        self._output.write(
-            f'\n[gate:{effective_gate.value}] step {step.step}: {step.plugin}.{step.capability}\n',
-        )
-        if effective_gate is Gate.HUMAN and prior_outputs:
-            self._output.write('  prior outputs:\n')
-            for alias, fields in prior_outputs.items():
-                self._output.write(f'    ${alias}: {dict(fields)!r}\n')
-        try:
-            answer = await self._input.read_line('  approve? [y/N] ')
-        except EOFError:
-            self._output.write('\n')
+        # Pause the inference spinner for the duration of the gate
+        # interaction. Without this, the stderr spinner keeps drawing
+        # "thinking…" frames while the REPL is actually blocked on the
+        # operator's y/N answer — both misleading and visually noisy
+        # against the gate prompt on stdout.
+        async with suspend_indicator():
+            self._output.write(
+                f'\n[gate:{effective_gate.value}] step {step.step}: {step.plugin}.{step.capability}\n',
+            )
+            if effective_gate is Gate.HUMAN and prior_outputs:
+                self._output.write('  prior outputs:\n')
+                for alias, fields in prior_outputs.items():
+                    self._output.write(f'    ${alias}: {dict(fields)!r}\n')
+            try:
+                answer = await self._input.read_line('  approve? [y/N] ')
+            except EOFError:
+                self._output.write('\n')
+                return GateDecision.ABORT
+            if answer.strip().lower() in {'y', 'yes'}:
+                return GateDecision.CONTINUE
             return GateDecision.ABORT
-        if answer.strip().lower() in {'y', 'yes'}:
-            return GateDecision.CONTINUE
-        return GateDecision.ABORT
 
 
 # --- The REPL ----------------------------------------------------------------
@@ -221,6 +279,7 @@ class Repl:
         prompt: str = '> ',
         banner: str = 'butter-agent. Ready.\n',
         commands: CommandRegistry | None = None,
+        indicator_factory: Callable[[], AbstractAsyncContextManager[object]] | None = None,
     ) -> None:
         self._loop = loop
         self._input = input_source
@@ -228,6 +287,11 @@ class Repl:
         self._prompt = prompt
         self._banner = banner
         self._commands = commands if commands is not None else CommandRegistry(())
+        # `indicator_factory` is consulted once per turn to wrap the
+        # awaited `run_turn` call. Default is `nullcontext` — no-op for
+        # tests and non-TTY runs. A TTY-aware caller wires in
+        # `InferenceIndicator` from `repl_prompt_toolkit`.
+        self._indicator_factory: Callable[[], AbstractAsyncContextManager[object]] = indicator_factory if indicator_factory is not None else _no_indicator
 
     async def run(self) -> None:
         """Drive the read-print loop until EOF on input."""
@@ -246,7 +310,8 @@ class Repl:
                     return
                 continue
             try:
-                result = await self._loop.run_turn(user_input)
+                async with self._indicator_factory():
+                    result = await self._loop.run_turn(user_input)
             except ModelProtocolError as exc:
                 self._output.write(f'[error] model adapter: {exc}\n')
                 continue
@@ -311,6 +376,14 @@ class Repl:
         self._output.write(f'[plan executed: {len(execution.plan.steps)} step(s)]\n')
         for alias, fields in execution.outputs.items():
             self._output.write(f'  ${alias}: {dict(fields)!r}\n')
+
+
+def _no_indicator() -> AbstractAsyncContextManager[object]:
+    # Default factory for `Repl(indicator_factory=...)`. `nullcontext()`
+    # returns an async-compatible context manager that does nothing,
+    # so the indicator seam adds zero overhead when unused (tests, non-
+    # TTY runs, custom adapters that own their own progress UI).
+    return nullcontext()
 
 
 def _debug_enabled() -> bool:
