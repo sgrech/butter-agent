@@ -4,7 +4,7 @@
 > (PR #22) then moved to its own repo per the now-completed
 > `specs/archive/plugin-externalization.md` — it now lives at
 > [`butter-plugin-notes`](https://github.com/sgrech/butter-plugin-notes)
-> (`v0.1.0`), loaded via a `config.toml` `[[plugin]]` declaration. This
+> (`v0.3.0`), loaded via a `config.toml` `[[plugin]]` declaration. This
 > spec remains the authoritative description of the *capability* (data
 > model, API surface, gate/chain behaviour); it is no longer a
 > description of where the code lives. The §4 `database` persistence
