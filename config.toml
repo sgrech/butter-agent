@@ -50,6 +50,20 @@ path = "~/.butter-agent/butter.db"
 # [[plugin]]
 # source = "github.com/sgrech/butter-plugin-clock@v0.2.0"
 #
+# A plugin entry may carry an optional `config` inline table — operator
+# settings surfaced read-only to that one plugin via PluginContext.config
+# (the model never sees it). The filesystem plugin uses it to gate
+# destructive operations: without `allow_delete = true` its `delete`
+# capability is disabled; recursive directory deletion additionally
+# requires `allow_recursive_delete = true`.
+# [[plugin]]
+# source = "github.com/sgrech/butter-plugin-filesystem@v0.1.0"
+# config = { allow_delete = false, allow_recursive_delete = false }
+#
 # Local dev (used as-is, no fetch):
 # [[plugin]]
 # path = "~/Workspace/butter-plugin-notes"
+#
+# [[plugin]]
+# path = "~/Workspace/butter-plugin-filesystem"
+# config = { allow_delete = true }
