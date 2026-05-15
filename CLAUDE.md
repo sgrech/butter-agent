@@ -30,5 +30,6 @@ All new code must follow the patterns documented in `specs/guidelines/`. Consult
 | Spec | When to consult |
 |------|----------------|
 | `specs/development/plugin-config-injection.md` | Before reading operator settings in a plugin, adding a `[[plugin]].config` key, or touching `PluginContext.config` / config parse + dump |
+| `specs/development/filesystem-plugin.md` | Before changing the filesystem plugin's capability surface, path/cwd model, or `delete` safety layering (the reference operator-config gate) |
 
 Development specs (roadmaps for WHAT to build) live in `specs/development/`. Completed or superseded specs are moved to `specs/archive/`.
