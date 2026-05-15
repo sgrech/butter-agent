@@ -20,7 +20,7 @@ Provide a capability-mediated shared SQLite store so write-plugins (notes, futur
 
 - Migrations beyond `CREATE TABLE IF NOT EXISTS` — schema evolution lands in a follow-up.
 - Transactions spanning multiple plugins — each call is its own implicit txn for v1.
-- Full-text / vector search — separate capability if ever needed.
+- Full-text / vector search — separate capability. Full-text search is now specced in `database-fts.md` (FTS5, stays `local-write`); semantic/vector search remains deferred (crosses the `network` blast-radius boundary — see `database-fts.md` §7).
 - Backup / export tooling — separate core concern, never a plugin capability.
 - Concurrency beyond SQLite's default WAL — no connection pooling.
 

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -210,6 +211,128 @@ async def test_update_and_delete_require_non_empty_where(plugin: DatabasePlugin,
         await plugin.execute(capability, payload, _ctx())
 
 
+# --- Full-text search --------------------------------------------------------
+
+
+def _rows(result: dict[str, object]) -> list[dict[str, object]]:
+    """Narrow a `search`/`select` result's `rows` for iteration in tests.
+
+    `execute` returns `dict[str, object]`, so `result['rows']` is `object`
+    to mypy --strict; the row shape is the documented `{rows: list[dict]}`
+    contract these tests exercise."""
+    return cast('list[dict[str, object]]', result['rows'])
+
+
+async def _fts_ready(plugin: DatabasePlugin, *bodies: str) -> None:
+    """define_table → insert `bodies` → define_fts on `body`."""
+    await _define_default(plugin)
+    for body in bodies:
+        await plugin.execute('insert', {'table': _T, 'row': {'body': body}}, _ctx())
+    result = await plugin.execute('define_fts', {'table': _T, 'columns': ['body']}, _ctx())
+    assert result == {'table': _T}
+
+
+async def test_search_finds_matching_rows(plugin: DatabasePlugin) -> None:
+    await _fts_ready(plugin, 'buy butter', 'call the dentist', 'buttered toast')
+    result = await plugin.execute('search', {'table': _T, 'query': 'butter'}, _ctx())
+    # Porter stemming: "butter" matches "buttered". Whole base rows, same
+    # shape as select. Order is bm25 rank (unasserted here — see id test).
+    assert {r['body'] for r in _rows(result)} == {'buy butter', 'buttered toast'}
+
+
+async def test_search_rebuild_backfills_preexisting_rows(plugin: DatabasePlugin) -> None:
+    """Rows inserted *before* define_fts are searchable (the migration step)."""
+    await _fts_ready(plugin, 'old note about butter')
+    result = await plugin.execute('search', {'table': _T, 'query': 'butter'}, _ctx())
+    assert [r['body'] for r in _rows(result)] == ['old note about butter']
+
+
+async def test_search_triggers_keep_index_live(plugin: DatabasePlugin) -> None:
+    await _fts_ready(plugin, 'first butter')
+    # INSERT after define_fts → indexed by the AFTER INSERT trigger.
+    await plugin.execute('insert', {'table': _T, 'row': {'body': 'second butter'}}, _ctx())
+    after_insert = await plugin.execute('search', {'table': _T, 'query': 'butter', 'order': 'id'}, _ctx())
+    assert [r['body'] for r in _rows(after_insert)] == ['first butter', 'second butter']
+
+    # UPDATE → AFTER UPDATE trigger re-indexes the new content.
+    await plugin.execute('update', {'table': _T, 'where': {'id': 1}, 'set': {'body': 'first margarine'}}, _ctx())
+    after_update = await plugin.execute('search', {'table': _T, 'query': 'butter'}, _ctx())
+    assert [r['body'] for r in _rows(after_update)] == ['second butter']
+
+    # DELETE → AFTER DELETE trigger tombstones the FTS row.
+    await plugin.execute('delete', {'table': _T, 'where': {'id': 2}}, _ctx())
+    after_delete = await plugin.execute('search', {'table': _T, 'query': 'butter'}, _ctx())
+    assert after_delete == {'rows': []}
+
+
+async def test_search_order_id_is_oldest_first(plugin: DatabasePlugin) -> None:
+    await _fts_ready(plugin, 'butter one', 'butter two', 'butter three')
+    result = await plugin.execute('search', {'table': _T, 'query': 'butter', 'order': 'id'}, _ctx())
+    assert [r['id'] for r in _rows(result)] == [1, 2, 3]
+
+
+async def test_search_limit_caps_results(plugin: DatabasePlugin) -> None:
+    await _fts_ready(plugin, 'butter a', 'butter b', 'butter c')
+    result = await plugin.execute('search', {'table': _T, 'query': 'butter', 'order': 'id', 'limit': 2}, _ctx())
+    assert [r['body'] for r in _rows(result)] == ['butter a', 'butter b']
+
+
+async def test_search_treats_fts5_metacharacters_as_literal_terms(plugin: DatabasePlugin) -> None:
+    """A query full of FTS5 syntax must not error or inject — just no match."""
+    await _fts_ready(plugin, 'plain note')
+    result = await plugin.execute('search', {'table': _T, 'query': 'alpha) OR "beta" NEAR(x'}, _ctx())
+    assert result == {'rows': []}  # parsed as literal terms, none present
+
+
+async def test_search_empty_query_raises(plugin: DatabasePlugin) -> None:
+    await _fts_ready(plugin, 'something')
+    with pytest.raises(DatabasePluginError, match='must contain at least one term'):
+        await plugin.execute('search', {'table': _T, 'query': '   '}, _ctx())
+
+
+async def test_search_rejects_unknown_order(plugin: DatabasePlugin) -> None:
+    await _fts_ready(plugin, 'x')
+    with pytest.raises(DatabasePluginError, match="'order' must be 'rank' or 'id'"):
+        await plugin.execute('search', {'table': _T, 'query': 'x', 'order': 'created_at'}, _ctx())
+
+
+async def test_define_fts_is_idempotent(plugin: DatabasePlugin) -> None:
+    await _fts_ready(plugin, 'butter note')
+    # Second define against an existing index must not raise or duplicate
+    # triggers (which would double-index every subsequent write).
+    await plugin.execute('define_fts', {'table': _T, 'columns': ['body']}, _ctx())
+    await plugin.execute('insert', {'table': _T, 'row': {'body': 'more butter'}}, _ctx())
+    result = await plugin.execute('search', {'table': _T, 'query': 'butter', 'order': 'id'}, _ctx())
+    assert [r['body'] for r in _rows(result)] == ['butter note', 'more butter']
+
+
+async def test_define_fts_on_missing_table_raises(plugin: DatabasePlugin) -> None:
+    with pytest.raises(DatabasePluginError, match='does not exist'):
+        await plugin.execute('define_fts', {'table': _T, 'columns': ['body']}, _ctx())
+
+
+async def test_define_fts_rejects_non_text_column(plugin: DatabasePlugin) -> None:
+    await plugin.execute(
+        'define_table',
+        {'table': _T, 'columns': {'body': {'type': 'text'}, 'score': {'type': 'integer'}}},
+        _ctx(),
+    )
+    with pytest.raises(DatabasePluginError, match='only text columns are full-text indexable'):
+        await plugin.execute('define_fts', {'table': _T, 'columns': ['score']}, _ctx())
+
+
+async def test_define_fts_rejects_unknown_column(plugin: DatabasePlugin) -> None:
+    await _define_default(plugin)
+    with pytest.raises(DatabasePluginError, match='cannot index unknown column'):
+        await plugin.execute('define_fts', {'table': _T, 'columns': ['nope']}, _ctx())
+
+
+async def test_define_fts_requires_non_empty_columns(plugin: DatabasePlugin) -> None:
+    await _define_default(plugin)
+    with pytest.raises(DatabasePluginError, match="input 'columns' must be a non-empty list"):
+        await plugin.execute('define_fts', {'table': _T, 'columns': []}, _ctx())
+
+
 # --- Manifest ----------------------------------------------------------------
 
 
@@ -226,6 +349,8 @@ async def test_built_in_manifest_is_all_internal_local_write(tmp_path: Path) -> 
             'select',
             'update',
             'delete',
+            'define_fts',
+            'search',
         }
         # Every capability is internal — invisible to the planner, callable
         # only plugin-to-plugin (spec §5).
