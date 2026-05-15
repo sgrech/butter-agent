@@ -1,5 +1,16 @@
 # Notes Plugin Spec
 
+> **Status: externalized.** Notes was implemented as a core built-in
+> (PR #22) then moved to its own repo per
+> `plugin-externalization.md` — it now lives at
+> [`butter-plugin-notes`](https://github.com/sgrech/butter-plugin-notes)
+> (`v0.1.0`), loaded via a `config.toml` `[[plugin]]` declaration. This
+> spec remains the authoritative description of the *capability* (data
+> model, API surface, gate/chain behaviour); it is no longer a
+> description of where the code lives. The §4 `database` persistence
+> constraints still hold — they are a `database` contract, not a
+> notes-location concern.
+
 ## 1. Purpose
 
 Notes is butter-agent's first `local-write` plugin: persistent free-form note capture from the REPL. It exists to prove the gate-handler `confirm` path end-to-end against a real model-emitted plan, to exercise the agent-mediated variable-pool data channel via `clock.now → notes.create`, and to serve as the worked example future write-plugins copy.
