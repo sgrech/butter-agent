@@ -17,6 +17,22 @@ max_blast_radius = "network"
 # module will enforce this once it lands.
 network_allowlist = []
 
+# Capability discovery (specs/development/capability-discovery.md). When
+# true, the planner is shown a compact plugin index and selects the
+# plugin(s) it needs before being given their capability schemas —
+# removing the keyword filter's top-8 truncation and registration-order
+# blindspot at the cost of one extra model round-trip per turn. Off by
+# default so it can be A/B'd on local models; the keyword filter remains
+# the implementation when this is false.
+capability_discovery = false
+
+# Skip-when-trivial cut-off for the above. When discovery is on but the
+# registry exposes this many or fewer user-facing capabilities, the whole
+# menu already fits without truncation, so the extra round-trip is skipped
+# and the keyword path runs instead. Default mirrors the keyword filter's
+# top_k (8): at or below it nothing is truncated anyway.
+discovery_capability_threshold = 8
+
 [model]
 # Local-first default per scope. Ollama with Qwen3 8B; swap provider for
 # anything that implements the ModelClient protocol.

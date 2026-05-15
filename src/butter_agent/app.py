@@ -175,7 +175,12 @@ async def build_repl(
         io_in = StdioInputSource()
         banner = _format_banner(config)
 
-    context_manager = DefaultContextManager(registry, history)
+    context_manager = DefaultContextManager(
+        registry,
+        history,
+        capability_discovery=config.core.capability_discovery,
+        discovery_capability_threshold=config.core.discovery_capability_threshold,
+    )
     model_client: ModelClient = (
         model
         if model is not None

@@ -26,9 +26,9 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Final, Protocol
 
-from butter_agent.core.loop import ExecutionResult, ModelContext, Turn
+from butter_agent.core.loop import DiscoverySelection, ExecutionResult, ModelContext, Turn
 from butter_agent.core.registry import PluginRegistry
 
 # --- Value types -------------------------------------------------------------
@@ -50,6 +50,29 @@ class MemorySnippet:
 
     source: str
     content: str
+
+
+@dataclass(frozen=True, slots=True)
+class PluginIndexEntry:
+    """One row of the capability-discovery Tier-1 index.
+
+    The index is the always-in-context menu the model picks from before
+    the planning pass: a plugin `name` plus a one-line `summary`, and
+    deliberately *no* capabilities. Bounded by plugin count (~3-5), so it
+    never truncates and has no keyword blindspot — the two failure modes
+    of `KeywordCapabilityFilter` recorded in
+    `specs/development/capability-discovery.md`.
+
+    `summary` is already resolved: the manifest's sanitised `[plugin]
+    .summary` when the author supplied one, otherwise a neutral generated
+    line naming the plugin's user-facing capabilities. Both are safe to
+    render verbatim — the manifest path was sanitised at the registry
+    trust boundary, the generated path is core-authored from identifier-
+    charset-restricted names.
+    """
+
+    name: str
+    summary: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -199,6 +222,17 @@ class DefaultContextManager:
     The registry is the same frozen `PluginRegistry` (invariant #2) the
     executor uses, so the model only ever sees descriptions for capabilities
     the executor can actually invoke.
+
+    Capability-discovery (`specs/development/capability-discovery.md`):
+    when `capability_discovery` is set the first pass surfaces a compact
+    Tier-1 `plugin_index` instead of keyword-filtered capabilities, and the
+    loop expects a `DiscoverySelection` it feeds back via `assemble(
+    selection=...)` for the Tier-2 schema pass. `discovery_active` folds in
+    the skip-when-trivial mitigation: it is computed once here (registry is
+    frozen — invariant #2 — and the decision never depends on the turn) so
+    the loop's path is fixed for the process (invariant #1). When discovery
+    is off, or on but the install is too small to benefit, every pass
+    behaves exactly as before via `KeywordCapabilityFilter`.
     """
 
     def __init__(
@@ -210,35 +244,90 @@ class DefaultContextManager:
         capability_filter: CapabilityFilter | None = None,
         history_window: int = 10,
         memory_top_k: int = 5,
+        capability_discovery: bool = False,
+        discovery_capability_threshold: int = 8,
     ) -> None:
         if history_window < 0:
             raise ValueError('history_window must be non-negative')
         if memory_top_k < 0:
             raise ValueError('memory_top_k must be non-negative')
+        if discovery_capability_threshold < 0:
+            raise ValueError('discovery_capability_threshold must be non-negative')
         self._history = history
         self._memory: MemoryRetriever = memory if memory is not None else NullMemoryRetriever()
         self._capability_filter: CapabilityFilter = capability_filter if capability_filter is not None else KeywordCapabilityFilter()
         self._history_window = history_window
         self._memory_top_k = memory_top_k
-        # Registry is frozen post-startup (invariant #2), so the descriptor view is computed once.
+        # Registry is frozen post-startup (invariant #2), so the descriptor
+        # view and the Tier-1 index are both computed once. Memory note
+        # `keyword-filter-haystack-cache-relies-on-invariant-2`: do not
+        # reconstruct descriptors per turn.
         self._descriptors = _all_descriptors(registry)
+        self._plugin_index = _plugin_index(registry)
+        # Skip-when-trivial: a 0/1-plugin index gives the model nothing to
+        # choose between, and when the whole user-facing menu is within the
+        # threshold the keyword filter already surfaces it untruncated — in
+        # both cases the discovery round-trip is pure latency. Decided once:
+        # depends only on the frozen registry + config, never the turn.
+        self._discovery_active = capability_discovery and len(self._plugin_index) > 1 and len(self._descriptors) > discovery_capability_threshold
 
-    async def assemble(self, turn: Turn, execution: ExecutionResult | None = None) -> ModelContext:
+    @property
+    def discovery_active(self) -> bool:
+        return self._discovery_active
+
+    async def assemble(
+        self,
+        turn: Turn,
+        execution: ExecutionResult | None = None,
+        selection: DiscoverySelection | None = None,
+    ) -> ModelContext:
+        if execution is not None and selection is not None:
+            # The three passes are mutually exclusive (see the protocol
+            # docstring). Fail loudly rather than silently collapsing to
+            # synthesis mode and dropping the selection — same fail-on-
+            # protocol-violation stance as ModelProtocolError in the loop.
+            raise ValueError('assemble: execution and selection are mutually exclusive passes')
         history = await self._history.recent(self._history_window) if self._history_window else ()
         memory = await self._memory.retrieve(turn.user_input, self._memory_top_k) if self._memory_top_k else ()
         payload: dict[str, object] = {
             'history': history,
             'memory': memory,
         }
-        if execution is None:
-            # Intent-recognition pass: model needs the capability menu to plan.
-            payload['capabilities'] = self._capability_filter.select(turn, self._descriptors)
-        else:
+        if execution is not None:
             # Synthesis pass: model must reply, not plan. Capabilities are
             # deliberately omitted so the prompt doesn't suggest more actions
             # when the model has just observed tool outputs.
             payload['execution'] = execution
+        elif selection is not None:
+            # Tier-2 planning pass: full schemas for exactly the plugins the
+            # model named in discovery. Same `capabilities` key as the legacy
+            # intent pass, so the planning prompt is unchanged — only *which*
+            # descriptors differ.
+            payload['capabilities'] = self._select_for(turn, selection)
+        elif self._discovery_active:
+            # Tier-1 discovery pass: the compact plugin index, no
+            # capabilities. The loop expects a DiscoverySelection back.
+            payload['plugin_index'] = self._plugin_index
+        else:
+            # Legacy intent pass (discovery off, or skipped-as-trivial):
+            # keyword-filtered capabilities, byte-for-byte the prior path.
+            payload['capabilities'] = self._capability_filter.select(turn, self._descriptors)
         return ModelContext(turn=turn, payload=payload)
+
+    def _select_for(self, turn: Turn, selection: DiscoverySelection) -> tuple[CapabilityDescriptor, ...]:
+        """Resolve a discovery selection to its plugins' full descriptors.
+
+        An empty selection, or one naming only unknown plugins, resolves to
+        nothing — fall back to the keyword filter over the whole descriptor
+        set so the model still has a menu to plan against rather than an
+        empty one (spec migration step 3: the keyword filter is retained as
+        the fallback when a discovery selection is empty/unresolved).
+        """
+        wanted = set(selection.plugins)
+        chosen = tuple(desc for desc in self._descriptors if desc.plugin in wanted)
+        if chosen:
+            return chosen
+        return self._capability_filter.select(turn, self._descriptors)
 
 
 def _all_descriptors(registry: PluginRegistry) -> tuple[CapabilityDescriptor, ...]:
@@ -262,3 +351,35 @@ def _all_descriptors(registry: PluginRegistry) -> tuple[CapabilityDescriptor, ..
                 ),
             )
     return tuple(descriptors)
+
+
+# A generated Tier-1 fallback names at most this many capabilities before
+# eliding the rest — enough for the model to recognise the plugin's
+# purpose, bounded so a wide plugin can't bloat the index the tier exists
+# to keep small.
+_INDEX_FALLBACK_CAP_NAMES: Final[int] = 6
+
+
+def _plugin_index(registry: PluginRegistry) -> tuple[PluginIndexEntry, ...]:
+    """Build the Tier-1 index: one row per plugin with user-facing capabilities.
+
+    Plugins exposing only `internal=True` capabilities (e.g. the shared
+    `database` infra plugin) are omitted — the model can't plan against
+    them, so an index row would only invite a rejected selection. The
+    summary is the manifest's sanitised one-liner when present, else a
+    neutral core-generated line listing the user-facing capability names.
+    """
+    entries: list[PluginIndexEntry] = []
+    for name in registry.names():
+        manifest = registry.get(name).manifest
+        public = [cap.name for cap in manifest.capabilities if not cap.internal]
+        if not public:
+            continue
+        if manifest.summary is not None:
+            summary = manifest.summary
+        else:
+            shown = ', '.join(public[:_INDEX_FALLBACK_CAP_NAMES])
+            elided = '' if len(public) <= _INDEX_FALLBACK_CAP_NAMES else ', …'
+            summary = f'{len(public)} capabilities: {shown}{elided}'
+        entries.append(PluginIndexEntry(name=name, summary=summary))
+    return tuple(entries)

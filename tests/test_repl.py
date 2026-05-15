@@ -23,6 +23,7 @@ import pytest
 from butter_agent.core.loop import (
     AgentLoop,
     ContextManager,
+    DiscoverySelection,
     ExecutionResult,
     ModelContext,
     ModelOutput,
@@ -71,7 +72,15 @@ class _CapturingOutput:
 
 @dataclass
 class _StubContextManager:
-    async def assemble(self, turn: Turn, execution: ExecutionResult | None = None) -> ModelContext:
+    discovery_active = False
+
+    async def assemble(
+        self,
+        turn: Turn,
+        execution: ExecutionResult | None = None,
+        selection: DiscoverySelection | None = None,
+    ) -> ModelContext:
+        del selection
         payload: dict[str, object] = {}
         if execution is not None:
             payload['execution'] = execution
@@ -150,7 +159,15 @@ async def test_repl_strips_whitespace_before_dispatch() -> None:
 
     @dataclass
     class _RecordingCM:
-        async def assemble(self, turn: Turn, execution: ExecutionResult | None = None) -> ModelContext:
+        discovery_active = False
+
+        async def assemble(
+            self,
+            turn: Turn,
+            execution: ExecutionResult | None = None,
+            selection: DiscoverySelection | None = None,
+        ) -> ModelContext:
+            del execution, selection
             captured.append(turn.user_input)
             return ModelContext(turn=turn, payload={})
 

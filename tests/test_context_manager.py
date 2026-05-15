@@ -22,8 +22,9 @@ from butter_agent.core.context_manager import (
     MemoryRetriever,
     MemorySnippet,
     NullMemoryRetriever,
+    PluginIndexEntry,
 )
-from butter_agent.core.loop import ExecutionResult, PlanStep, TaskPlan, Turn
+from butter_agent.core.loop import DiscoverySelection, ExecutionResult, PlanStep, TaskPlan, Turn
 from butter_agent.core.registry import (
     BlastRadius,
     PluginRegistry,
@@ -461,6 +462,196 @@ def test_in_memory_history_rejects_non_positive_max() -> None:
 async def test_null_memory_retriever_returns_empty() -> None:
     result = await NullMemoryRetriever().retrieve('anything', 5)
     assert result == ()
+
+
+# --- Capability discovery ---------------------------------------------------
+
+
+def _caps(n: int, prefix: str) -> tuple[tuple[str, str], ...]:
+    return tuple((f'{prefix}{i}', f'{prefix} capability {i}') for i in range(n))
+
+
+def test_discovery_inactive_by_default() -> None:
+    cm = DefaultContextManager(_registry(('notes', _caps(3, 'n'))), InMemoryConversationHistory())
+    assert cm.discovery_active is False
+
+
+async def test_discovery_active_surfaces_plugin_index_not_capabilities() -> None:
+    # 3 plugins, 9 user-facing caps > default threshold 8 → discovery on.
+    registry = _registry(
+        ('notes', _caps(3, 'n')),
+        ('search', _caps(3, 's')),
+        ('files', _caps(3, 'f')),
+    )
+    cm = DefaultContextManager(registry, InMemoryConversationHistory(), capability_discovery=True)
+
+    assert cm.discovery_active is True
+    context = await cm.assemble(_turn('what dependencies does pyproject have'))
+
+    assert 'capabilities' not in context.payload
+    index = context.payload['plugin_index']
+    assert index == (
+        PluginIndexEntry(name='notes', summary='3 capabilities: n0, n1, n2'),
+        PluginIndexEntry(name='search', summary='3 capabilities: s0, s1, s2'),
+        PluginIndexEntry(name='files', summary='3 capabilities: f0, f1, f2'),
+    )
+
+
+async def test_discovery_index_prefers_manifest_summary_over_generated() -> None:
+    summarised = """
+[plugin]
+name = "weather"
+version = "0.1.0"
+blast_radius = "network"
+entrypoint = "main:Plugin"
+summary = "Live forecasts and current conditions."
+
+[[capability]]
+name = "forecast"
+description = "N-day forecast"
+input_schema = {}
+output_schema = {}
+"""
+    builder = RegistryBuilder(max_blast_radius=BlastRadius.NETWORK)
+    builder.register(parse_manifest(summarised), _StubPlugin())
+    builder.register(parse_manifest(_manifest_toml('notes', ('create', 'Create a note'))), _StubPlugin())
+    registry = builder.build()
+
+    cm = DefaultContextManager(
+        registry,
+        InMemoryConversationHistory(),
+        capability_discovery=True,
+        discovery_capability_threshold=0,
+    )
+    context = await cm.assemble(_turn('hi'))
+
+    assert context.payload['plugin_index'] == (
+        PluginIndexEntry(name='weather', summary='Live forecasts and current conditions.'),
+        PluginIndexEntry(name='notes', summary='1 capabilities: create'),
+    )
+
+
+async def test_discovery_index_omits_internal_only_plugins() -> None:
+    # An all-internal infra plugin (e.g. database) is unplannable, so it
+    # must not appear in the Tier-1 index — selecting it could only fail.
+    infra = """
+[plugin]
+name = "database"
+version = "0.1.0"
+blast_radius = "local-write"
+entrypoint = "main:Plugin"
+
+[[capability]]
+name = "insert"
+description = "internal"
+input_schema = {}
+output_schema = {}
+internal = true
+"""
+    builder = RegistryBuilder(max_blast_radius=BlastRadius.NETWORK)
+    builder.register(parse_manifest(infra), _StubPlugin())
+    builder.register(parse_manifest(_manifest_toml('notes', ('create', 'Create a note'), ('list', 'List notes'))), _StubPlugin())
+    # A second user-facing plugin so the index has >1 row and discovery
+    # actually activates (otherwise the single-plugin skip would fire and
+    # we'd never see the index — the omission is what's under test).
+    builder.register(parse_manifest(_manifest_toml('search', ('web', 'Search the web'))), _StubPlugin())
+    registry = builder.build()
+
+    cm = DefaultContextManager(
+        registry,
+        InMemoryConversationHistory(),
+        capability_discovery=True,
+        discovery_capability_threshold=0,
+    )
+    context = await cm.assemble(_turn('hi'))
+
+    assert context.payload['plugin_index'] == (
+        PluginIndexEntry(name='notes', summary='2 capabilities: create, list'),
+        PluginIndexEntry(name='search', summary='1 capabilities: web'),
+    )
+
+
+def test_discovery_skipped_when_single_user_facing_plugin() -> None:
+    # One plugin → the index has nothing to choose between; the extra
+    # round-trip is pure latency, so discovery stays off even if enabled.
+    registry = _registry(('notes', _caps(20, 'n')))
+    cm = DefaultContextManager(registry, InMemoryConversationHistory(), capability_discovery=True)
+    assert cm.discovery_active is False
+
+
+def test_discovery_skipped_when_menu_within_threshold() -> None:
+    # 2 plugins but only 6 caps ≤ threshold 8 — the keyword filter would
+    # surface the whole menu untruncated anyway, so discovery is skipped.
+    registry = _registry(('notes', _caps(3, 'n')), ('search', _caps(3, 's')))
+    cm = DefaultContextManager(registry, InMemoryConversationHistory(), capability_discovery=True)
+    assert cm.discovery_active is False
+
+
+async def test_tier2_selection_filters_to_named_plugins() -> None:
+    registry = _registry(
+        ('notes', (('create', 'Create a note'),)),
+        ('search', (('web', 'Search the web'),)),
+        ('files', (('read', 'Read a file'),)),
+    )
+    cm = DefaultContextManager(registry, InMemoryConversationHistory(), capability_discovery=True)
+
+    context = await cm.assemble(_turn('find it'), selection=DiscoverySelection(plugins=('search', 'files')))
+
+    caps = context.payload['capabilities']
+    assert isinstance(caps, tuple)
+    assert {c.plugin for c in caps} == {'search', 'files'}
+    assert 'plugin_index' not in context.payload
+
+
+async def test_tier2_empty_selection_falls_back_to_keyword_filter() -> None:
+    # Spec migration step 3: an empty/unresolved selection falls back to
+    # the keyword filter over the whole set, never an empty menu.
+    registry = _registry(
+        ('notes', (('create', 'Create a note'),)),
+        ('search', (('web', 'Search the web'),)),
+    )
+    cm = DefaultContextManager(registry, InMemoryConversationHistory(), capability_discovery=True)
+
+    context = await cm.assemble(_turn('search the web'), selection=DiscoverySelection(plugins=()))
+
+    caps = context.payload['capabilities']
+    assert isinstance(caps, tuple)
+    assert {c.plugin for c in caps} == {'notes', 'search'}
+
+
+async def test_tier2_unknown_plugin_selection_falls_back_to_keyword_filter() -> None:
+    registry = _registry(
+        ('notes', (('create', 'Create a note'),)),
+        ('search', (('web', 'Search the web'),)),
+    )
+    cm = DefaultContextManager(registry, InMemoryConversationHistory(), capability_discovery=True)
+
+    context = await cm.assemble(_turn('hi'), selection=DiscoverySelection(plugins=('ghost',)))
+
+    caps = context.payload['capabilities']
+    assert isinstance(caps, tuple)
+    assert caps != ()
+    assert {c.plugin for c in caps} == {'notes', 'search'}
+
+
+async def test_assemble_rejects_execution_and_selection_together() -> None:
+    registry = _registry(('notes', (('create', 'Create a note'),)))
+    cm = DefaultContextManager(registry, InMemoryConversationHistory())
+    execution = ExecutionResult(
+        plan=TaskPlan(steps=(PlanStep(step=1, plugin='notes', capability='create', inputs={}, gate='none'),)),
+        outputs={},
+    )
+    with pytest.raises(ValueError, match='mutually exclusive'):
+        await cm.assemble(_turn('q'), execution=execution, selection=DiscoverySelection(plugins=('notes',)))
+
+
+def test_negative_discovery_threshold_rejected() -> None:
+    with pytest.raises(ValueError, match='discovery_capability_threshold'):
+        DefaultContextManager(
+            _registry(('notes', (('create', 'Create a note'),))),
+            InMemoryConversationHistory(),
+            discovery_capability_threshold=-1,
+        )
 
 
 # --- Protocol introspection --------------------------------------------------

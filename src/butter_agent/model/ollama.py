@@ -38,8 +38,10 @@ from butter_agent.core.context_manager import (
     CapabilityDescriptor,
     ConversationEntry,
     MemorySnippet,
+    PluginIndexEntry,
 )
 from butter_agent.core.loop import (
+    DiscoverySelection,
     ExecutionResult,
     ModelContext,
     ModelOutput,
@@ -148,11 +150,19 @@ class OllamaModelClient:
         self._transport: Transport = transport if transport is not None else _UrllibTransport()
 
     async def generate(self, context: ModelContext) -> ModelOutput:
-        # Presence of an `execution` payload entry flips the adapter into
-        # synthesis mode: different system prompt (reply-only) and the
-        # rendered user prompt includes the tool results.
-        synthesis = context.payload.get('execution') is not None
-        system_prompt = _SYNTHESIS_SYSTEM_PROMPT if synthesis else _SYSTEM_PROMPT
+        # The pass is read off the payload shape, exactly as the context
+        # manager assembled it (the loop stays opaque to payload contents):
+        #   - `execution`    → synthesis (reply-only prompt + tool results)
+        #   - `plugin_index` → Tier-1 discovery (pick plugins, don't plan)
+        #   - otherwise      → intent/Tier-2 planning (the plan prompt;
+        #     identical for legacy keyword-filtered and Tier-2 schemas)
+        payload = context.payload
+        if payload.get('execution') is not None:
+            system_prompt = _SYNTHESIS_SYSTEM_PROMPT
+        elif payload.get('plugin_index') is not None:
+            system_prompt = _DISCOVERY_SYSTEM_PROMPT
+        else:
+            system_prompt = _SYSTEM_PROMPT
         body: dict[str, object] = {
             'model': self._model,
             'messages': [
@@ -264,6 +274,43 @@ plan has already run. Return JSON only. No prose outside the object.
 """
 
 
+_DISCOVERY_SYSTEM_PROMPT = """\
+You are butter-agent, a local-first personal assistant. Before planning,
+you choose which plugins you need. The "Available plugins" section in the
+user message lists every loaded plugin by name with a one-line summary of
+what it does. You have NOT been shown individual capabilities or their
+inputs yet — that detail is provided only after you select plugins.
+
+Decision rule (apply in this order):
+
+1. If answering the user could require any listed plugin, return a
+   "discover" object naming the plugin(s) you will need. Name every
+   plugin a multi-step answer might touch (e.g. one to read a value and
+   another to store it) — you get one selection, then you plan. Use
+   plugin names exactly as written; do not invent names.
+2. If no listed plugin is relevant and the request is purely
+   conversational (greeting, opinion, clarification), return a "reply".
+3. If no listed plugin can help and the request needs one, return a
+   "reply" saying what is missing. Do not invent a plugin.
+
+The "Available plugins" section is complete and exhaustive. If it is
+empty (shown as "(none)") you have no plugins. Never speculate about
+plugins or capabilities beyond what is shown.
+
+Output schemas — your response must be exactly one of these:
+
+Discover:
+  {"type": "discover", "plugins": ["<plugin name>", ...]}
+
+Reply:
+  {"type": "reply", "text": "..."}
+
+Do NOT return "type": "plan" here — you cannot plan before seeing the
+selected plugins' capabilities. Return JSON only. No prose outside the
+object.
+"""
+
+
 def _render_user_prompt(context: ModelContext) -> str:
     """Render the user-facing prompt from the assembled `ModelContext`.
 
@@ -276,12 +323,23 @@ def _render_user_prompt(context: ModelContext) -> str:
     parts: list[str] = []
     execution = payload.get('execution')
 
-    if execution is None:
-        # Intent-recognition pass. Capabilities are always rendered — even
-        # when empty — so the model sees the absence rather than inferring
-        # it. A missing section let the model confabulate plausible plugins
-        # ("file system access", "web search") when asked what it could do;
-        # rendering "(none)" forces honesty.
+    if execution is None and payload.get('plugin_index') is not None:
+        # Tier-1 discovery pass. The index is rendered even when empty —
+        # "(none)" forces the model to admit it has no plugins rather than
+        # confabulate one, the same honesty guard the capability list uses.
+        index = _expect_tuple(payload.get('plugin_index', ()), PluginIndexEntry, 'plugin_index')
+        parts.append('Available plugins:')
+        if index:
+            parts.extend(f'- "{entry.name}": {entry.summary}' for entry in index)
+        else:
+            parts.append('(none)')
+        parts.append('')
+    elif execution is None:
+        # Intent / Tier-2 planning pass. Capabilities are always rendered —
+        # even when empty — so the model sees the absence rather than
+        # inferring it. A missing section let the model confabulate
+        # plausible plugins ("file system access", "web search") when asked
+        # what it could do; rendering "(none)" forces honesty.
         capabilities = _expect_tuple(payload.get('capabilities', ()), CapabilityDescriptor, 'capabilities')
         parts.append('Available capabilities:')
         if capabilities:
@@ -379,8 +437,10 @@ def _parse_output(content: str) -> ModelOutput:
         return _parse_reply(data)
     if kind == 'plan':
         return _parse_plan(data)
+    if kind == 'discover':
+        return _parse_discovery(data)
     raise ModelProtocolError(
-        f"model output 'type' must be 'reply' or 'plan', got {kind!r}",
+        f"model output 'type' must be 'reply', 'plan', or 'discover', got {kind!r}",
     )
 
 
@@ -389,6 +449,26 @@ def _parse_reply(data: dict[str, object]) -> ModelReply:
     if not isinstance(text, str):
         raise ModelProtocolError('reply.text must be a string')
     return ModelReply(text=text)
+
+
+def _parse_discovery(data: dict[str, object]) -> DiscoverySelection:
+    """Parse a Tier-1 discovery selection.
+
+    Structural only, like every other branch: `plugins` must be a list of
+    non-empty strings. An empty list is structurally valid and passed
+    through — the context manager treats an empty/unresolved selection as
+    the keyword-filter fallback (spec migration step 3), so rejecting it
+    here would turn a recoverable model choice into a hard error.
+    """
+    raw = data.get('plugins')
+    if not isinstance(raw, list):
+        raise ModelProtocolError('discover.plugins must be an array of plugin-name strings')
+    plugins: list[str] = []
+    for idx, item in enumerate(raw):
+        if not isinstance(item, str) or not item:
+            raise ModelProtocolError(f'discover.plugins[{idx}] must be a non-empty string')
+        plugins.append(item)
+    return DiscoverySelection(plugins=tuple(plugins))
 
 
 def _parse_plan(data: dict[str, object]) -> TaskPlan:

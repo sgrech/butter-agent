@@ -52,17 +52,36 @@ class ConfigError(Exception):
 
 @dataclass(frozen=True, slots=True)
 class CoreConfig:
-    """Core-side policy: the blast-radius ceiling and the network allowlist.
+    """Core-side policy: blast-radius ceiling, network allowlist, discovery.
 
     `max_blast_radius` is the invariant-#7 ceiling — `RegistryBuilder`
     rejects any plugin whose declared radius exceeds it. `network_allowlist`
     is a future-facing hook for restricting which hosts a `NETWORK` plugin
     may reach; it is parsed and surfaced here but not yet enforced (the
     plugin source-fetch module will read it).
+
+    `capability_discovery` switches the loop from the single keyword-filtered
+    intent pass to two-tier progressive disclosure (Tier-1 plugin index →
+    model picks plugins → Tier-2 schemas → plan). Default `false` so the
+    feature can be A/B'd on local models without a flag-day; see
+    `specs/development/capability-discovery.md`. `KeywordCapabilityFilter`
+    remains the implementation when this is off.
+
+    `discovery_capability_threshold` is the skip-when-trivial cut-off: when
+    discovery is on but the registry exposes this many *or fewer*
+    user-facing capabilities, the whole menu already fits without
+    truncation, so the extra discovery round-trip buys nothing and is
+    skipped (the keyword path runs instead). The default mirrors
+    `KeywordCapabilityFilter`'s `top_k` (8) — at or below it the keyword
+    filter would surface everything anyway, so the cut-off is *derived*
+    from existing behaviour, not a guessed constant. Operators tuning for
+    a measured token budget on a large install override it here.
     """
 
     max_blast_radius: BlastRadius = BlastRadius.NETWORK
     network_allowlist: tuple[str, ...] = ()
+    capability_discovery: bool = False
+    discovery_capability_threshold: int = 8
 
 
 @dataclass(frozen=True, slots=True)
@@ -200,6 +219,8 @@ def dump_config(config: Config) -> str:
     lines.append('[core]')
     lines.append(f'max_blast_radius = {_quote(config.core.max_blast_radius.value)}')
     lines.append(f'network_allowlist = {_quote_list(config.core.network_allowlist)}')
+    lines.append(f'capability_discovery = {"true" if config.core.capability_discovery else "false"}')
+    lines.append(f'discovery_capability_threshold = {config.core.discovery_capability_threshold}')
     lines.append('')
 
     lines.append('[model]')
@@ -315,7 +336,19 @@ def _parse_core(section: dict[str, object]) -> CoreConfig:
             ) from exc
 
     allowlist = _optional_string_list(section, 'core.network_allowlist', 'network_allowlist')
-    return CoreConfig(max_blast_radius=max_radius, network_allowlist=allowlist)
+    defaults = CoreConfig()
+    discovery = _optional_bool(section, 'core.capability_discovery', 'capability_discovery')
+    threshold = _optional_non_negative_int(
+        section,
+        'core.discovery_capability_threshold',
+        'discovery_capability_threshold',
+    )
+    return CoreConfig(
+        max_blast_radius=max_radius,
+        network_allowlist=allowlist,
+        capability_discovery=discovery if discovery is not None else defaults.capability_discovery,
+        discovery_capability_threshold=threshold if threshold is not None else defaults.discovery_capability_threshold,
+    )
 
 
 def _parse_model(section: dict[str, object]) -> ModelConfig:
@@ -453,6 +486,25 @@ def _optional_positive_float(section: dict[str, object], path: str, key: str) ->
     if numeric <= 0:
         raise ConfigError(f'{path}: expected positive number, got {numeric}')
     return numeric
+
+
+def _optional_non_negative_int(section: dict[str, object], path: str, key: str) -> int | None:
+    """Parse an optional non-negative integer (e.g. a count threshold).
+
+    Returns None when absent. Booleans are rejected up front because
+    Python treats `bool` as an `int` subclass — without the guard a
+    stray `true` would silently parse as `1`. Zero is permitted: a
+    threshold of 0 means "never skip discovery for size" (only the
+    ≤1-plugin skip remains).
+    """
+    if key not in section:
+        return None
+    value = section[key]
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ConfigError(f'{path}: expected integer, got {type(value).__name__}')
+    if value < 0:
+        raise ConfigError(f'{path}: expected non-negative integer, got {value}')
+    return value
 
 
 def _optional_str(section: dict[str, object], path: str, key: str) -> str | None:
