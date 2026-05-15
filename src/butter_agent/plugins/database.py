@@ -133,7 +133,14 @@ class DatabasePlugin:
             raise DatabasePluginError('at most one column may declare primary_key')
         if primary_keys == 0:
             # Auto surrogate key so every table has a stable rowid alias
-            # callers can reference (spec §5).
+            # callers can reference (spec §5). A caller-declared column
+            # literally named `id` would collide with this and SQLite
+            # would reject the DDL with an opaque "duplicate column name"
+            # — refuse early with an actionable message instead.
+            if 'id' in columns:
+                raise DatabasePluginError(
+                    "column 'id' conflicts with the auto-generated primary key — declare it with primary_key: true to own it, or rename it",
+                )
             column_sql.insert(0, 'id INTEGER PRIMARY KEY AUTOINCREMENT')
 
         await self._db.execute_ddl(

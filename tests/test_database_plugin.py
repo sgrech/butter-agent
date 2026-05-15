@@ -162,6 +162,24 @@ async def test_define_table_rejects_multiple_primary_keys(plugin: DatabasePlugin
         )
 
 
+async def test_define_table_rejects_id_column_colliding_with_auto_key(plugin: DatabasePlugin) -> None:
+    """A caller `id` column without primary_key would duplicate the
+    auto-injected surrogate — refused with an actionable message rather
+    than an opaque SQLite 'duplicate column name' failure."""
+    with pytest.raises(DatabasePluginError, match="column 'id' conflicts with the auto-generated primary key"):
+        await plugin.execute(
+            'define_table',
+            {'table': _T, 'columns': {'id': {'type': 'integer'}, 'body': {'type': 'text'}}},
+            _ctx(),
+        )
+    # But a caller that *owns* `id` via primary_key is fine (no auto key).
+    await plugin.execute(
+        'define_table',
+        {'table': _T, 'columns': {'id': {'type': 'text', 'primary_key': True}}},
+        _ctx(),
+    )
+
+
 async def test_define_table_rejects_invalid_type(plugin: DatabasePlugin) -> None:
     with pytest.raises(DatabasePluginError, match='invalid type'):
         await plugin.execute(
