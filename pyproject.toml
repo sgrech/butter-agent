@@ -1,6 +1,6 @@
 [project]
 name = 'butter-agent'
-version = '0.0.1'
+version = '0.1.0'
 description = 'Local-first open-source conversational agent runtime. I pass butter.'
 readme = 'README.md'
 requires-python = '>=3.12'

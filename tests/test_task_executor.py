@@ -503,6 +503,62 @@ async def test_plugin_context_depth_ceiling_raises_before_dispatch() -> None:
     assert database.calls == []
 
 
+# --- _PluginContext.config (per-plugin config injection) -------------------
+
+
+def _config_registry(**by_name: dict[str, object]) -> PluginRegistry:
+    """A registry whose plugins carry the given per-name config tables."""
+    return PluginRegistry(
+        {
+            name: RegisteredPlugin(
+                manifest=_manifest(name, capabilities=(_cap('noop'),)),
+                plugin=_RecordingPlugin(responses={}),
+                config=cfg,
+            )
+            for name, cfg in by_name.items()
+        },
+    )
+
+
+def test_plugin_context_exposes_own_config() -> None:
+    registry = _config_registry(filesystem={'allow_delete': True, 'allow_recursive_delete': False})
+    ctx = _PluginContext(owner='filesystem', registry=registry, step=1)
+    assert ctx.config == {'allow_delete': True, 'allow_recursive_delete': False}
+
+
+def test_plugin_context_config_defaults_empty() -> None:
+    # RegisteredPlugin built without config (built-ins, two-arg register).
+    registry = PluginRegistry(
+        {'clock': RegisteredPlugin(manifest=_manifest('clock', capabilities=(_cap('now'),)), plugin=_RecordingPlugin(responses={}))},
+    )
+    ctx = _PluginContext(owner='clock', registry=registry, step=1)
+    assert ctx.config == {}
+
+
+def test_plugin_context_config_isolated_per_owner() -> None:
+    """Invariant #6: a plugin sees only its own config, keyed by the
+    closed-over owner identity — never another plugin's."""
+    registry = _config_registry(
+        filesystem={'allow_delete': True},
+        notes={'secret': 'notes-only'},
+    )
+    fs_ctx = _PluginContext(owner='filesystem', registry=registry, step=1)
+    notes_ctx = _PluginContext(owner='notes', registry=registry, step=1)
+    assert fs_ctx.config == {'allow_delete': True}
+    assert notes_ctx.config == {'secret': 'notes-only'}
+    assert 'secret' not in fs_ctx.config
+
+
+def test_plugin_context_config_is_read_only() -> None:
+    """Third-party plugin code cannot mutate the registry's snapshot."""
+    registry = _config_registry(filesystem={'allow_delete': True})
+    ctx = _PluginContext(owner='filesystem', registry=registry, step=1)
+    with pytest.raises(TypeError):
+        ctx.config['allow_delete'] = False  # type: ignore[index]
+    # Snapshot intact for the next invocation.
+    assert _PluginContext(owner='filesystem', registry=registry, step=1).config == {'allow_delete': True}
+
+
 async def test_plugin_context_call_raises_for_non_internal_target() -> None:
     """Defence in depth: even if `requires` somehow names a non-internal cap
     (registry build should reject this), `call` refuses at runtime."""

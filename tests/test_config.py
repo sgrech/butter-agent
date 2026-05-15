@@ -282,6 +282,63 @@ def test_plugin_entries_must_be_array() -> None:
         load_config('plugin = "oops"')
 
 
+# --- Per-plugin config table -----------------------------------------------
+
+
+def test_plugin_config_defaults_empty() -> None:
+    cfg = load_config('[[plugin]]\npath = "/dev/x"')
+    assert cfg.plugins[0].config == {}
+
+
+def test_plugin_config_parsed_on_path_entry() -> None:
+    cfg = load_config(
+        """
+        [[plugin]]
+        path = "/dev/filesystem"
+        config = { allow_delete = true, allow_recursive_delete = false }
+        """,
+    )
+    entry = cfg.plugins[0]
+    assert isinstance(entry, PluginPath)
+    assert entry.config == {'allow_delete': True, 'allow_recursive_delete': False}
+
+
+def test_plugin_config_parsed_on_source_entry() -> None:
+    cfg = load_config(
+        """
+        [[plugin]]
+        source = "github.com/sgrech/butter-plugin-filesystem@v0.1.0"
+        config = { allow_delete = true }
+        """,
+    )
+    entry = cfg.plugins[0]
+    assert isinstance(entry, PluginSource)
+    assert entry.config == {'allow_delete': True}
+
+
+def test_plugin_config_must_be_table() -> None:
+    with pytest.raises(ConfigError, match='`config` must be a table'):
+        load_config('[[plugin]]\npath = "/dev/x"\nconfig = 7')
+
+
+def test_plugin_config_nested_and_list_values_allowed() -> None:
+    cfg = load_config(
+        """
+        [[plugin]]
+        path = "/dev/x"
+        config = { roots = ["/a", "/b"], limits = { max = 10 } }
+        """,
+    )
+    assert cfg.plugins[0].config == {'roots': ['/a', '/b'], 'limits': {'max': 10}}
+
+
+def test_plugin_config_rejects_unserialisable_value() -> None:
+    # TOML date/time literals parse to datetime, which dump_config cannot
+    # round-trip — rejected at parse time so the invariant stays airtight.
+    with pytest.raises(ConfigError, match='unsupported value type'):
+        load_config('[[plugin]]\npath = "/dev/x"\nconfig = { when = 2026-05-15 }')
+
+
 # --- Top-level / TOML errors -----------------------------------------------
 
 

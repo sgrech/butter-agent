@@ -29,6 +29,6 @@ All new code must follow the patterns documented in `specs/guidelines/`. Consult
 
 | Spec | When to consult |
 |------|----------------|
-| *(add rows as specs are created)* | |
+| `specs/development/plugin-config-injection.md` | Before reading operator settings in a plugin, adding a `[[plugin]].config` key, or touching `PluginContext.config` / config parse + dump |
 
 Development specs (roadmaps for WHAT to build) live in `specs/development/`. Completed or superseded specs are moved to `specs/archive/`.

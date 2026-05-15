@@ -29,7 +29,9 @@ What this module does NOT do:
 from __future__ import annotations
 
 import math
+import re
 import tomllib
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Final
 
@@ -101,10 +103,17 @@ class PluginSource:
     `ref` is the explicit pinned reference (tag or commit SHA). Branch
     refs like `main`, `master`, `HEAD` are rejected at parse time — the
     scope's "pinned refs" rule is enforced here, not at fetch time.
+
+    `config` is the operator-supplied, plugin-scoped settings table from
+    the `[[plugin]]` entry. Core treats the values as opaque — only the
+    receiving plugin knows its own keys (mirrors how manifests keep
+    input/output schemas plugin-side). Closed over by core and surfaced to
+    exactly one plugin via `PluginContext.config` (invariant #6).
     """
 
     repo: str
     ref: str
+    config: Mapping[str, object] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -115,9 +124,13 @@ class PluginPath:
     Mutually exclusive with `PluginSource` within a single `[[plugin]]`
     entry. `path` may use `~` and is left unexpanded here — the loader
     resolves it just before reading the manifest.
+
+    `config` carries the same plugin-scoped settings table as
+    `PluginSource.config` — see that docstring.
     """
 
     path: str
+    config: Mapping[str, object] = field(default_factory=dict)
 
 
 PluginDeclaration = PluginSource | PluginPath
@@ -208,8 +221,50 @@ def dump_config(config: Config) -> str:
             lines.append(f'source = {_quote(f"{plugin.repo}@{plugin.ref}")}')
         else:
             lines.append(f'path = {_quote(plugin.path)}')
+        if plugin.config:
+            lines.append(f'config = {_toml_inline_table(plugin.config)}')
 
     return '\n'.join(lines) + '\n'
+
+
+def _toml_inline_table(table: Mapping[str, object]) -> str:
+    """Render a mapping as a TOML inline table that round-trips losslessly."""
+    if not table:
+        return '{}'
+    return '{ ' + ', '.join(f'{_toml_key(k)} = {_toml_value(v)}' for k, v in table.items()) + ' }'
+
+
+# Bare TOML keys (no quoting needed). Anything else is emitted as a basic
+# string key so arbitrary operator-chosen config keys still round-trip.
+_BARE_KEY_RE: Final = re.compile(r'^[A-Za-z0-9_-]+$')
+
+
+def _toml_key(key: str) -> str:
+    return key if _BARE_KEY_RE.match(key) else _quote(key)
+
+
+def _toml_value(value: object) -> str:
+    """Serialise a parsed-TOML value back to TOML text.
+
+    Only the types `_parse_plugin_config` admits reach here, so the final
+    branch is unreachable in a correctly validated `Config` — it is a
+    defensive guard, not a user-facing path. Floats use `repr` (not
+    `_format_number`) so an integer-valued float like `2.0` keeps its
+    decimal point and parses back as a float rather than an int.
+    """
+    if isinstance(value, bool):
+        return 'true' if value else 'false'
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        return repr(value)
+    if isinstance(value, str):
+        return _quote(value)
+    if isinstance(value, list):
+        return '[' + ', '.join(_toml_value(v) for v in value) + ']'
+    if isinstance(value, dict):
+        return _toml_inline_table(value)
+    raise ConfigError(f'cannot serialise config value of type {type(value).__name__}')
 
 
 def _format_number(value: float) -> str:
@@ -307,11 +362,13 @@ def _parse_plugin(index: int, raw: object) -> PluginDeclaration:
     if not has_source and not has_path:
         raise ConfigError(f'[[plugin]] entry #{index + 1}: missing `source` (production) or `path` (local-dev)')
 
+    plugin_config = _parse_plugin_config(index, raw.get('config', {}))
+
     if has_path:
         path = raw['path']
         if not isinstance(path, str) or not path:
             raise ConfigError(f'[[plugin]] entry #{index + 1}: `path` must be a non-empty string')
-        return PluginPath(path=path)
+        return PluginPath(path=path, config=plugin_config)
 
     source = raw['source']
     if not isinstance(source, str) or not source:
@@ -329,7 +386,48 @@ def _parse_plugin(index: int, raw: object) -> PluginDeclaration:
         raise ConfigError(
             f'[[plugin]] entry #{index + 1}: source {source!r} uses unpinned ref {ref!r} (use a tag or commit SHA, not a branch)',
         )
-    return PluginSource(repo=repo, ref=ref)
+    return PluginSource(repo=repo, ref=ref, config=plugin_config)
+
+
+# TOML scalar/container types core can both store and re-emit. Anything
+# outside this set (notably `datetime`, which tomllib produces for bare
+# date/time literals) is rejected at parse time so the round-trip
+# invariant `load_config(dump_config(c)) == c` can never be silently
+# violated by an un-serialisable plugin-config value.
+_TOML_SCALARS: Final = (bool, int, float, str)
+
+
+def _parse_plugin_config(index: int, raw: object) -> dict[str, object]:
+    """Validate one `[[plugin]].config` table.
+
+    Values are plugin-private — core does not interpret keys. It only
+    enforces that every value is a type it can faithfully round-trip
+    through `dump_config`, so the receiving plugin sees exactly what the
+    operator wrote and the config writer never loses data.
+    """
+    if not isinstance(raw, dict):
+        raise ConfigError(f'[[plugin]] entry #{index + 1}: `config` must be a table')
+
+    def _check(value: object, path: str) -> None:
+        # `bool` is a subclass of `int`; the explicit tuple membership is
+        # fine here since we accept both — no bool/int confusion to guard.
+        if isinstance(value, _TOML_SCALARS):
+            return
+        if isinstance(value, list):
+            for i, item in enumerate(value):
+                _check(item, f'{path}[{i}]')
+            return
+        if isinstance(value, dict):
+            for k, v in value.items():
+                _check(v, f'{path}.{k}')
+            return
+        raise ConfigError(
+            f'[[plugin]] entry #{index + 1}: config {path}: unsupported value type {type(value).__name__} (allowed: string, integer, float, bool, array, table)',
+        )
+
+    for key, value in raw.items():
+        _check(value, key)
+    return dict(raw)
 
 
 # --- Field helpers -----------------------------------------------------------
