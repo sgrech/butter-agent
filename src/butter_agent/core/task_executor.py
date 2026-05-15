@@ -24,6 +24,7 @@ the adapter renders accordingly.
 
 from __future__ import annotations
 
+import logging
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -39,33 +40,139 @@ from butter_agent.core.registry import (
     PluginRegistry,
 )
 
+logger = logging.getLogger(__name__)
+
+
 # --- PluginContext ----------------------------------------------------------
 
 
-class _NotYetWiredPluginContext:
-    """Stub `PluginContext` for the initial Plugin Protocol rollout.
+class PluginContextError(Exception):
+    """Raised when a plugin misuses its `PluginContext`.
 
-    The Plugin Protocol now takes a `context` argument so plugin authors and
-    the executor share a single shape. A real context — one whose `call`
-    method dispatches to internal capabilities — lands in the next slice
-    (task #381 checklist item #393). Until then, the executor still always
-    passes a context (so plugins are written against the final signature),
-    but `call` raises if any plugin actually tries to use it.
-
-    The stub closes over the caller's name so the eventual real context can
-    be a drop-in replacement.
+    Deliberately **not** an `ExecutorError`. An `ExecutorError` is a core
+    contract fault (bad plan validation, missing alias) and must surface to
+    the caller. A bad `ctx.call` — naming a capability the plugin never
+    declared in its manifest `requires` — is *plugin-author* misbehaviour,
+    indistinguishable from any other exception third-party plugin code may
+    raise (invariant #6). It therefore flows through the executor's broad
+    plugin-failure path and is recorded as a `failure_reason`, so the loop
+    can still synthesise a reply instead of tearing the REPL down (the
+    2026-05-14 user correction). The exception type is preserved verbatim in
+    `failure_reason`, so a plugin author still sees `PluginContextError` in
+    debug output and knows to fix their manifest — it is a programming bug,
+    not a runtime condition a plugin should `except`.
     """
 
-    __slots__ = ('_caller',)
 
-    def __init__(self, caller: str) -> None:
-        self._caller = caller
+#: Hard ceiling on `PluginContext.call` nesting. The `requires` graph is a
+#: DAG (cycles rejected at registry build, invariant #1), so legitimate
+#: chains are short; this is pure defence-in-depth against a regressed
+#: build-time check turning into a REPL-killing `RecursionError`.
+_MAX_CTX_DEPTH: int = 32
+
+
+class _PluginContext:
+    """The real per-invocation `PluginContext` (task #381 slice 2).
+
+    Closes over the **owner** — the plugin currently executing — sourced
+    from the frozen registry, never from call arguments, so a plugin cannot
+    forge identity by handing a different context to another plugin
+    (invariant #6). `call` enforces that the requested capability is in the
+    owner's manifest `requires`, then dispatches to the target plugin with a
+    *fresh* `_PluginContext` whose owner is the target. Dispatch is therefore
+    recursive: an `a -> b -> c` chain composes, and each hop is independently
+    restricted to its own `requires` set. Cycles are impossible — the
+    registry builder rejects `requires` cycles at startup (invariant #1), so
+    this recursion always terminates. A `_MAX_CTX_DEPTH` ceiling is enforced
+    anyway: if that build-time invariant ever regressed, unbounded recursion
+    would raise `RecursionError` (a `BaseException`, *not* an `Exception`),
+    which the executor's broad plugin-failure catch would miss — tearing the
+    REPL down, the exact failure mode the 2026-05-14 correction forbids. The
+    ceiling converts that into a recorded `PluginContextError` instead.
+
+    Namespacing of an internal store (e.g. the `database` plugin prefixing
+    tables by caller) is deliberately *not* done here — that is task #381
+    slice 3. The seam it will use is `self._owner` at the dispatch point,
+    which is exactly the calling plugin's identity.
+    """
+
+    __slots__ = ('_depth', '_owner', '_registry', '_step')
+
+    def __init__(
+        self,
+        *,
+        owner: str,
+        registry: PluginRegistry,
+        step: int,
+        depth: int = 0,
+    ) -> None:
+        self._owner = owner
+        self._registry = registry
+        self._step = step
+        self._depth = depth
 
     async def call(self, capability: str, inputs: dict[str, object]) -> dict[str, object]:
-        del inputs
-        raise NotImplementedError(
-            f'plugin {self._caller!r} attempted PluginContext.call({capability!r}); plugin-to-plugin calls are not yet wired in this build',
+        """Invoke an internal capability declared in the owner's `requires`.
+
+        Args:
+            capability: Fully-qualified `plugin.capability` reference,
+                identical to how it appears in the owner's manifest
+                `requires`.
+            inputs: Inputs forwarded verbatim to the target capability.
+
+        Returns:
+            The target capability's output dict.
+
+        Raises:
+            PluginContextError: If the nesting depth ceiling is exceeded, if
+                `capability` is not in the owner's declared `requires`, or
+                (defensively) it does not resolve to an `internal=True`
+                capability. All are plugin-author / manifest bugs the
+                registry builder normally catches at startup, but a clear
+                error here beats an obscure one if an invariant regresses.
+        """
+        if self._depth >= _MAX_CTX_DEPTH:
+            raise PluginContextError(
+                f'plugin {self._owner!r}: PluginContext.call nesting exceeded {_MAX_CTX_DEPTH} (calling {capability!r}) — a requires cycle that escaped registry-build validation',
+            )
+
+        owner_manifest = self._registry.get(self._owner).manifest
+        if capability not in owner_manifest.requires:
+            raise PluginContextError(
+                f'plugin {self._owner!r} called {capability!r} via PluginContext but did not declare it in manifest requires',
+            )
+
+        # `capability` passed manifest validation as `plugin.capability`
+        # and is a member of `requires`, so the split is total.
+        target_plugin, target_capability = capability.split('.', 1)
+        target = self._registry.get(target_plugin)
+        cap = target.manifest.capability(target_capability)
+        if not cap.internal:
+            raise PluginContextError(
+                f'plugin {self._owner!r} called {capability!r} but it is not internal — only internal=true capabilities are callable plugin-to-plugin (registry build should have rejected this)',
+            )
+
+        # Nested call: log indented one level below the owner so a reader
+        # sees `database.insert` sitting under its parent plan step.
+        logger.debug(
+            '%sstep %d: %s -> %s',
+            '  ' * (self._depth + 1),
+            self._step,
+            self._owner,
+            capability,
         )
+
+        child = _PluginContext(
+            owner=target_plugin,
+            registry=self._registry,
+            step=self._step,
+            depth=self._depth + 1,
+        )
+        # Copy inputs across the plugin boundary: the target is third-party
+        # code (invariant #6) and must not be able to mutate the caller's
+        # dict. Mirrors the executor's defensive copies elsewhere and the
+        # FakePluginContext test helper, so fake and real behave alike.
+        return await target.plugin.execute(target_capability, dict(inputs), child)
 
 
 # --- Gate types --------------------------------------------------------------
@@ -233,7 +340,12 @@ class DefaultTaskExecutor:
 
             resolved_inputs = self._resolve_inputs(step, outputs)
             registered = self._registry.get(step.plugin)
-            context = _NotYetWiredPluginContext(caller=step.plugin)
+            logger.debug('step %d: executing %s.%s', step.step, step.plugin, step.capability)
+            context = _PluginContext(
+                owner=step.plugin,
+                registry=self._registry,
+                step=step.step,
+            )
             try:
                 step_output = await registered.plugin.execute(step.capability, resolved_inputs, context)
             except ExecutorError:

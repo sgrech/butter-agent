@@ -7,6 +7,7 @@ blast-radius minimum-gate injection (#5/#7).
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 
@@ -17,18 +18,25 @@ from butter_agent.core.registry import (
     BlastRadius,
     Capability,
     Plugin,
+    PluginContext,
     PluginManifest,
+    PluginRegistry,
+    RegisteredPlugin,
     RegistryBuilder,
 )
 from butter_agent.core.task_executor import (
+    _MAX_CTX_DEPTH,
     AlwaysContinueGateHandler,
     DefaultTaskExecutor,
     Gate,
     GateDecision,
     GateHandler,
     PlanValidationError,
+    PluginContextError,
     VariableResolutionError,
+    _PluginContext,
 )
+from tests.support import FakePluginContext
 
 # --- Plugin / registry test helpers -----------------------------------------
 
@@ -56,6 +64,7 @@ def _manifest(
     *,
     radius: BlastRadius = BlastRadius.READ_ONLY,
     capabilities: tuple[Capability, ...],
+    requires: tuple[str, ...] = (),
 ) -> PluginManifest:
     return PluginManifest(
         name=name,
@@ -63,6 +72,7 @@ def _manifest(
         blast_radius=radius,
         entrypoint='stub:Plugin',
         capabilities=capabilities,
+        requires=requires,
     )
 
 
@@ -251,20 +261,21 @@ async def test_validation_rejects_empty_plan() -> None:
 
 
 async def test_executor_passes_plugin_context_to_execute() -> None:
-    """Every `execute` call gets a PluginContext whose call() exists.
+    """Every `execute` call gets a real, per-invocation `PluginContext`.
 
-    The stub context raises if actually used (real wiring lands in slice 2),
-    but the Plugin Protocol is now three-arg and the executor must comply.
+    Slice 2 replaced the raising stub with a context that dispatches for
+    real. The Protocol is three-arg; the executor must supply a context
+    that satisfies it.
     """
 
-    captured: list[object] = []
+    captured: list[PluginContext] = []
 
     class _ContextCapturingPlugin:
         async def execute(
             self,
             capability: str,
             inputs: dict[str, object],
-            context: object,
+            context: PluginContext,
         ) -> dict[str, object]:
             del capability, inputs
             captured.append(context)
@@ -277,8 +288,276 @@ async def test_executor_passes_plugin_context_to_execute() -> None:
     )
     await executor.execute(plan)
     assert len(captured) == 1
-    ctx = captured[0]
-    assert hasattr(ctx, 'call')
+    assert callable(captured[0].call)
+
+
+# --- PluginContext dispatch (invariant #6, task #381 slice 2) ----------------
+
+
+@dataclass
+class _CallingPlugin:
+    """Plugin that, on its declared capability, makes one `ctx.call` and
+    returns whatever the internal capability produced."""
+
+    target: str
+    inner_inputs: dict[str, object]
+    seen: list[dict[str, object]] = field(default_factory=list)
+
+    async def execute(
+        self,
+        capability: str,
+        inputs: dict[str, object],
+        context: PluginContext,
+    ) -> dict[str, object]:
+        del capability, inputs
+        result = await context.call(self.target, self.inner_inputs)
+        self.seen.append(result)
+        return result
+
+
+async def test_plugin_context_call_dispatches_to_declared_internal_capability() -> None:
+    """A plugin that declared `requires` reaches the internal capability and
+    gets its output back, while the internal cap stays out of the plan."""
+    database = _RecordingPlugin(responses={'insert': {'id': 42}})
+    notes = _CallingPlugin(target='database.insert', inner_inputs={'row': {'body': 'hi'}})
+    executor = _make_executor(
+        (
+            _manifest(
+                'database',
+                radius=BlastRadius.LOCAL_WRITE,
+                capabilities=(_cap('insert', input_schema={'row': 'object'}, internal=True),),
+            ),
+            database,
+        ),
+        (
+            _manifest(
+                'notes',
+                radius=BlastRadius.LOCAL_WRITE,
+                capabilities=(_cap('create', input_schema={'body': 'string'}),),
+                requires=('database.insert',),
+            ),
+            notes,
+        ),
+    )
+
+    plan = TaskPlan(
+        steps=(PlanStep(step=1, plugin='notes', capability='create', inputs={'body': 'hi'}, gate='none', outputs_as='note'),),
+    )
+    result = await executor.execute(plan)
+
+    assert database.calls == [('insert', {'row': {'body': 'hi'}})]
+    assert notes.seen == [{'id': 42}]
+    assert result.outputs == {'note': {'id': 42}}
+    assert result.failed_at_step is None
+
+
+async def test_plugin_context_call_to_undeclared_capability_is_recorded_as_failure() -> None:
+    """Calling a capability not in the plugin's `requires` is a plugin-author
+    bug — surfaced as a step failure (invariant #6), never an executor crash.
+
+    `PluginContextError` is deliberately not an `ExecutorError`, so it flows
+    through the same path as any other third-party plugin exception: recorded
+    on the result so the loop can synthesise instead of tearing down.
+    """
+    database = _RecordingPlugin(responses={'insert': {'id': 1}})
+    # `notes` declares NO requires, yet tries to call database.insert.
+    notes = _CallingPlugin(target='database.insert', inner_inputs={'row': {}})
+    executor = _make_executor(
+        (
+            _manifest(
+                'database',
+                radius=BlastRadius.LOCAL_WRITE,
+                capabilities=(_cap('insert', internal=True),),
+            ),
+            database,
+        ),
+        (
+            _manifest('notes', radius=BlastRadius.LOCAL_WRITE, capabilities=(_cap('create'),)),
+            notes,
+        ),
+    )
+
+    plan = TaskPlan(
+        steps=(PlanStep(step=1, plugin='notes', capability='create', inputs={}, gate='none'),),
+    )
+    result = await executor.execute(plan)
+
+    assert result.failed_at_step == 1
+    assert result.failure_reason is not None
+    assert 'PluginContextError' in result.failure_reason
+    assert 'database.insert' in result.failure_reason
+    # The internal plugin was never reached — enforcement happens before dispatch.
+    assert database.calls == []
+
+
+async def test_plugin_context_dispatch_is_recursive_with_per_hop_requires() -> None:
+    """`a -> b -> c`: each hop gets a fresh context restricted to its own
+    `requires`. The chain composes and the outermost output propagates."""
+    c = _RecordingPlugin(responses={'leaf': {'value': 'deep'}})
+    b = _CallingPlugin(target='c.leaf', inner_inputs={})
+    a = _CallingPlugin(target='b.mid', inner_inputs={})
+    executor = _make_executor(
+        (
+            _manifest('c', radius=BlastRadius.LOCAL_WRITE, capabilities=(_cap('leaf', internal=True),)),
+            c,
+        ),
+        (
+            _manifest(
+                'b',
+                radius=BlastRadius.LOCAL_WRITE,
+                capabilities=(_cap('mid', internal=True),),
+                requires=('c.leaf',),
+            ),
+            b,
+        ),
+        (
+            _manifest(
+                'a',
+                radius=BlastRadius.LOCAL_WRITE,
+                capabilities=(_cap('top'),),
+                requires=('b.mid',),
+            ),
+            a,
+        ),
+    )
+
+    plan = TaskPlan(
+        steps=(PlanStep(step=1, plugin='a', capability='top', inputs={}, gate='none', outputs_as='r'),),
+    )
+    result = await executor.execute(plan)
+
+    assert c.calls == [('leaf', {})]
+    assert b.seen == [{'value': 'deep'}]
+    assert a.seen == [{'value': 'deep'}]
+    assert result.outputs == {'r': {'value': 'deep'}}
+
+
+def _registry(*pairs: tuple[PluginManifest, Plugin]) -> PluginRegistry:
+    builder = RegistryBuilder(max_blast_radius=BlastRadius.NETWORK)
+    for manifest, plugin in pairs:
+        builder.register(manifest, plugin)
+    return builder.build()
+
+
+def _unchecked_registry(*pairs: tuple[PluginManifest, Plugin]) -> PluginRegistry:
+    """Build a `PluginRegistry` without `RegistryBuilder.build()` validation.
+
+    Used only to exercise `_PluginContext`'s runtime defence-in-depth guard,
+    which is otherwise unreachable because build-time validation rejects a
+    `requires` entry that points at a non-internal capability.
+    """
+    return PluginRegistry({m.name: RegisteredPlugin(manifest=m, plugin=p) for m, p in pairs})
+
+
+async def test_plugin_context_call_raises_plugin_context_error_for_undeclared_target() -> None:
+    """White-box: enforcement raises `PluginContextError` directly, before
+    any dispatch. (The executor wraps this into a step failure; here we pin
+    the exception type so a rename can't silently weaken the contract.)"""
+    database = _RecordingPlugin(responses={'insert': {}})
+    registry = _registry(
+        (
+            _manifest('database', radius=BlastRadius.LOCAL_WRITE, capabilities=(_cap('insert', internal=True),)),
+            database,
+        ),
+        (_manifest('notes', capabilities=(_cap('create'),)), _RecordingPlugin(responses={})),
+    )
+    ctx = _PluginContext(owner='notes', registry=registry, step=1)
+
+    with pytest.raises(PluginContextError, match='did not declare it in manifest requires'):
+        await ctx.call('database.insert', {})
+    assert database.calls == []
+
+
+async def test_plugin_context_depth_ceiling_raises_before_dispatch() -> None:
+    """Defence-in-depth: at the nesting ceiling, `call` raises a recorded
+    `PluginContextError` rather than recursing into a `RecursionError` (a
+    `BaseException` that would escape the executor's catch and kill the REPL).
+
+    Real cycles are unreachable (rejected at registry build), so the guard
+    is exercised by constructing a context already at the ceiling depth.
+    """
+    database = _RecordingPlugin(responses={'insert': {}})
+    registry = _registry(
+        (
+            _manifest('database', radius=BlastRadius.LOCAL_WRITE, capabilities=(_cap('insert', internal=True),)),
+            database,
+        ),
+        (
+            _manifest(
+                'notes',
+                radius=BlastRadius.LOCAL_WRITE,
+                capabilities=(_cap('create'),),
+                requires=('database.insert',),
+            ),
+            _RecordingPlugin(responses={}),
+        ),
+    )
+    ctx = _PluginContext(owner='notes', registry=registry, step=1, depth=_MAX_CTX_DEPTH)
+
+    with pytest.raises(PluginContextError, match='nesting exceeded'):
+        await ctx.call('database.insert', {})
+    # Guard fires before any dispatch — the target is never reached.
+    assert database.calls == []
+
+
+async def test_plugin_context_call_raises_for_non_internal_target() -> None:
+    """Defence in depth: even if `requires` somehow names a non-internal cap
+    (registry build should reject this), `call` refuses at runtime."""
+    other = _RecordingPlugin(responses={'public': {}})
+    # `requires` points at a non-internal cap. Construct the manifest
+    # directly so we bypass RegistryBuilder's build-time rejection and
+    # exercise the runtime guard in isolation.
+    caller_manifest = _manifest('caller', capabilities=(_cap('go'),), requires=('other.public',))
+    registry = _unchecked_registry(
+        (_manifest('other', capabilities=(_cap('public', internal=False),)), other),
+        (caller_manifest, _RecordingPlugin(responses={})),
+    )
+    ctx = _PluginContext(owner='caller', registry=registry, step=2)
+
+    with pytest.raises(PluginContextError, match='not internal'):
+        await ctx.call('other.public', {})
+    assert other.calls == []
+
+
+async def test_plugin_context_logs_nested_call_under_parent_step(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A nested `ctx.call` logs against its parent plan step, indented one
+    level below the step line so a reader sees the call hierarchy."""
+    database = _RecordingPlugin(responses={'insert': {'id': 1}})
+    notes = _CallingPlugin(target='database.insert', inner_inputs={'row': {}})
+    executor = _make_executor(
+        (
+            _manifest(
+                'database',
+                radius=BlastRadius.LOCAL_WRITE,
+                capabilities=(_cap('insert', internal=True),),
+            ),
+            database,
+        ),
+        (
+            _manifest(
+                'notes',
+                radius=BlastRadius.LOCAL_WRITE,
+                capabilities=(_cap('create'),),
+                requires=('database.insert',),
+            ),
+            notes,
+        ),
+    )
+
+    plan = TaskPlan(
+        steps=(PlanStep(step=1, plugin='notes', capability='create', inputs={}, gate='none'),),
+    )
+    with caplog.at_level(logging.DEBUG, logger='butter_agent.core.task_executor'):
+        await executor.execute(plan)
+
+    messages = [r.getMessage() for r in caplog.records]
+    assert 'step 1: executing notes.create' in messages
+    nested = '  step 1: notes -> database.insert'
+    assert nested in messages
+    # Nested line is indented past the parent step line.
+    assert messages.index('step 1: executing notes.create') < messages.index(nested)
 
 
 async def test_validation_rejects_plans_naming_internal_capability() -> None:
@@ -652,3 +931,45 @@ async def test_plugin_failure_stops_subsequent_steps_with_partial_outputs() -> N
     # Step 3 never ran — both because it was after the failure point and
     # because the executor halts rather than cascading. Verify via call log.
     assert good.calls == [('do', {})]
+
+
+# --- FakePluginContext helper (task #381 slice 2, checklist #395) ------------
+
+
+async def test_fake_plugin_context_records_calls_and_returns_canned_response() -> None:
+    """A plugin can be exercised in isolation with the shared fake context —
+    no registry or executor required."""
+
+    class _Plugin:
+        async def execute(
+            self,
+            capability: str,
+            inputs: dict[str, object],
+            context: PluginContext,
+        ) -> dict[str, object]:
+            del capability
+            stored = await context.call('database.insert', {'row': inputs})
+            return {'note_id': stored['id']}
+
+    ctx = FakePluginContext(responses={'database.insert': {'id': 99}})
+    result = await _Plugin().execute('create', {'body': 'hi'}, ctx)
+
+    assert result == {'note_id': 99}
+    assert ctx.calls == [('database.insert', {'row': {'body': 'hi'}})]
+
+
+async def test_fake_plugin_context_raises_configured_error() -> None:
+    """`errors` lets a test drive the plugin's failure path deterministically."""
+    ctx = FakePluginContext(errors={'database.insert': RuntimeError('disk full')})
+    with pytest.raises(RuntimeError, match='disk full'):
+        await ctx.call('database.insert', {'row': {}})
+    # The invocation is recorded before the configured error fires.
+    assert ctx.calls == [('database.insert', {'row': {}})]
+
+
+async def test_fake_plugin_context_unstubbed_capability_is_loud() -> None:
+    """A missing canned response is a test-wiring bug, not an empty dict —
+    it must fail loudly so an unstubbed dependency can't pass silently."""
+    ctx = FakePluginContext()
+    with pytest.raises(AssertionError, match='no canned response'):
+        await ctx.call('database.select', {})
