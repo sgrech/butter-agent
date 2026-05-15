@@ -39,8 +39,8 @@ import inspect
 import os
 import subprocess
 import sys
-from collections.abc import Iterable
-from dataclasses import dataclass
+from collections.abc import Iterable, Mapping
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol, cast
 
@@ -128,10 +128,16 @@ def _slugify(repo: str) -> str:
 
 @dataclass(frozen=True, slots=True)
 class LoadedPlugin:
-    """One successfully loaded plugin — manifest plus a live instance ready to register."""
+    """One successfully loaded plugin — manifest plus a live instance ready to register.
+
+    `config` is carried straight through from the declaration so the
+    bootstrap can hand it to `RegistryBuilder.register` without re-reading
+    `config.toml`.
+    """
 
     manifest: PluginManifest
     plugin: Plugin
+    config: Mapping[str, object] = field(default_factory=dict)
 
 
 class PluginLoader:
@@ -151,7 +157,7 @@ class PluginLoader:
         plugin_dir = self._resolve(declaration)
         manifest = _read_manifest(plugin_dir)
         plugin = _import_entrypoint(plugin_dir, manifest)
-        return LoadedPlugin(manifest=manifest, plugin=plugin)
+        return LoadedPlugin(manifest=manifest, plugin=plugin, config=declaration.config)
 
     def _resolve(self, declaration: PluginDeclaration) -> Path:
         if isinstance(declaration, PluginPath):

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
@@ -37,6 +38,8 @@ FLAT_FIXTURE = FIXTURES / 'fake_plugin_flat'
 
 class _UnusedContext:
     """Stand-in for a PluginContext when the test just needs a third argument."""
+
+    config: Mapping[str, object] = {}
 
     async def call(self, capability: str, inputs: dict[str, object]) -> dict[str, object]:
         del capability, inputs

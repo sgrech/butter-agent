@@ -139,7 +139,7 @@ async def build_repl(
         # External plugins after the built-in infra so their `requires`
         # (e.g. notes → database.*) resolve and they cannot shadow it.
         for entry in loaded:
-            builder.register(entry.manifest, entry.plugin)
+            builder.register(entry.manifest, entry.plugin, config=entry.config)
         registry = builder.build()
     except RegistryError as exc:
         raise PluginLoadError(f'registry rejected plugin: {exc}') from exc

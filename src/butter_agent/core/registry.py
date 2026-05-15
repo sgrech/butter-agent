@@ -31,7 +31,8 @@ from __future__ import annotations
 
 import re
 import tomllib
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Final, Protocol
 
@@ -124,6 +125,19 @@ class PluginContext(Protocol):
     one per `execute` call and passes it in. The plugin cannot forge identity
     by passing a different context to another plugin.
     """
+
+    @property
+    def config(self) -> Mapping[str, object]:
+        """The executing plugin's own, operator-supplied config table.
+
+        Sourced from the `config` table on this plugin's `[[plugin]]`
+        entry in `config.toml`. Keyed by the executing plugin's identity,
+        closed over by core exactly like the caller identity behind
+        `call` — a plugin can never see another plugin's config, and the
+        mapping it gets is read-only (invariant #6). Empty when the
+        operator declared no `config` table.
+        """
+        ...
 
     async def call(self, capability: str, inputs: dict[str, object]) -> dict[str, object]:
         """Invoke an internal capability declared in the caller's `requires`.
@@ -348,10 +362,17 @@ def _parse_capability(plugin_name: str, raw: object) -> Capability:
 
 @dataclass(frozen=True, slots=True)
 class RegisteredPlugin:
-    """A plugin instance paired with its validated manifest."""
+    """A plugin instance paired with its validated manifest.
+
+    `config` is the operator-supplied, plugin-scoped settings table for
+    this plugin (from its `[[plugin]]` entry). Stored here so the executor
+    can hand each plugin only its own config, keyed by name — never
+    another plugin's (invariant #6).
+    """
 
     manifest: PluginManifest
     plugin: Plugin
+    config: Mapping[str, object] = field(default_factory=dict)
 
 
 class PluginRegistry:
@@ -404,8 +425,21 @@ class RegistryBuilder:
         self._entries: dict[str, RegisteredPlugin] = {}
         self._built = False
 
-    def register(self, manifest: PluginManifest, plugin: Plugin) -> None:
-        """Add a plugin to the in-progress registry."""
+    def register(
+        self,
+        manifest: PluginManifest,
+        plugin: Plugin,
+        *,
+        config: Mapping[str, object] | None = None,
+    ) -> None:
+        """Add a plugin to the in-progress registry.
+
+        `config` is the plugin's operator-supplied settings table. It is
+        keyword-only and defaults to empty so built-in infrastructure
+        (e.g. `database`) and tests that don't exercise config keep the
+        two-argument call. A defensive copy is stored — the registry owns
+        its snapshot and a caller's later mutation must not leak in.
+        """
         if self._built:
             raise RegistryFrozenError('registry has already been built')
         if not radius_permits(self._max_blast_radius, manifest.blast_radius):
@@ -414,7 +448,11 @@ class RegistryBuilder:
             )
         if manifest.name in self._entries:
             raise DuplicatePluginError(f'plugin {manifest.name!r} already registered')
-        self._entries[manifest.name] = RegisteredPlugin(manifest=manifest, plugin=plugin)
+        self._entries[manifest.name] = RegisteredPlugin(
+            manifest=manifest,
+            plugin=plugin,
+            config=dict(config) if config is not None else {},
+        )
 
     def build(self) -> PluginRegistry:
         """Freeze the builder and return the immutable registry.

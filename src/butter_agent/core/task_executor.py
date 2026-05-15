@@ -134,6 +134,19 @@ class _PluginContext:
         self._step = step
         self._depth = depth
 
+    @property
+    def config(self) -> Mapping[str, object]:
+        """This plugin's own operator-supplied config, read-only.
+
+        Sourced from the frozen registry keyed by `self._owner` — the
+        same closed-over identity `call` uses, never a call argument
+        (invariant #6). Wrapped in a `MappingProxyType` so third-party
+        plugin code cannot mutate the registry's snapshot. For a nested
+        `call`, the child context's owner is the *target* plugin, so the
+        target transparently sees its own config and never the caller's.
+        """
+        return MappingProxyType(dict(self._registry.get(self._owner).config))
+
     async def call(self, capability: str, inputs: dict[str, object]) -> dict[str, object]:
         """Invoke an internal capability declared in the owner's `requires`.
 

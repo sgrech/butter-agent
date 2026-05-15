@@ -14,6 +14,7 @@ inline per test module.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 
 
@@ -29,11 +30,16 @@ class FakePluginContext:
     A missing canned response is a test-wiring bug, not a runtime
     condition, so `call` raises `AssertionError` rather than returning an
     empty dict — that would silently mask an unstubbed dependency.
+
+    `config` mirrors the real `PluginContext.config` — the plugin's own
+    operator-supplied settings table. Defaults to empty; a test
+    exercising a config-gated capability sets it explicitly.
     """
 
     responses: dict[str, dict[str, object]] = field(default_factory=dict)
     errors: dict[str, BaseException] = field(default_factory=dict)
     calls: list[tuple[str, dict[str, object]]] = field(default_factory=list)
+    config: Mapping[str, object] = field(default_factory=dict)
 
     async def call(self, capability: str, inputs: dict[str, object]) -> dict[str, object]:
         self.calls.append((capability, dict(inputs)))

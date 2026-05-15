@@ -25,7 +25,7 @@ from butter_agent.cli_commands.configure import ConfigureCommand
 from butter_agent.cli_commands.help import HelpCommand
 from butter_agent.cli_commands.quit import QuitCommand
 from butter_agent.cli_commands.status import StatusCommand
-from butter_agent.core.config import Config, CoreConfig, ModelConfig, PluginSource, StorageConfig, dump_config, load_config
+from butter_agent.core.config import Config, CoreConfig, ModelConfig, PluginPath, PluginSource, StorageConfig, dump_config, load_config
 from butter_agent.core.loop import AgentLoop, ExecutionResult, ModelContext, ModelOutput, ModelReply, TaskPlan, Turn, TurnResult
 from butter_agent.core.registry import BlastRadius
 from butter_agent.core.repl import CommandRegistry, CommandResult, Repl
@@ -76,6 +76,30 @@ def test_dump_config_roundtrips_custom_with_plugins() -> None:
 
 def test_dump_config_escapes_special_chars() -> None:
     original = Config(storage=StorageConfig(path='C:\\Users\\butter\\"weird"\\db.sqlite'))
+    assert load_config(dump_config(original)) == original
+
+
+def test_dump_config_roundtrips_plugin_config_table() -> None:
+    # Exercises every value type the inline-table serialiser handles:
+    # bool, int, integer-valued float (must keep its '.0'), string,
+    # nested list and nested table.
+    original = Config(
+        plugins=(
+            PluginPath(
+                path='~/Workspace/butter-plugin-filesystem',
+                config={
+                    'allow_delete': True,
+                    'allow_recursive_delete': False,
+                    'max_results': 200,
+                    'ratio': 2.0,
+                    'label': 'fs"x"',
+                    'roots': ['/a', '/b'],
+                    'limits': {'max': 10},
+                },
+            ),
+            PluginSource(repo='github.com/sgrech/butter-plugin-clock', ref='v0.2.0'),
+        ),
+    )
     assert load_config(dump_config(original)) == original
 
 
