@@ -277,6 +277,54 @@ async def test_search_limit_caps_results(plugin: DatabasePlugin) -> None:
     assert [r['body'] for r in _rows(result)] == ['butter a', 'butter b']
 
 
+async def test_search_default_order_is_bm25_not_bare_rank(plugin: DatabasePlugin) -> None:
+    """Default `rank` order is bm25 relevance, and must not collide with
+    a base column literally named `rank`.
+
+    Regression for PR #24 review: bare `ORDER BY rank` is
+    `ambiguous column name: rank` once the JOIN brings a base `rank`
+    column into scope. The less-relevant (long, term-diluted) row is
+    inserted first so relevance order differs from id order — proving
+    bm25 is actually applied, not insertion order.
+    """
+    await plugin.execute(
+        'define_table',
+        {'table': _T, 'columns': {'rank': {'type': 'text'}, 'body': {'type': 'text'}}},
+        _ctx(),
+    )
+    await plugin.execute('insert', {'table': _T, 'row': {'rank': 'x', 'body': 'butter ' + 'filler ' * 40}}, _ctx())
+    await plugin.execute('insert', {'table': _T, 'row': {'rank': 'y', 'body': 'butter butter'}}, _ctx())
+    await plugin.execute('define_fts', {'table': _T, 'columns': ['body']}, _ctx())
+
+    by_rank = await plugin.execute('search', {'table': _T, 'query': 'butter'}, _ctx())
+    assert [r['id'] for r in _rows(by_rank)] == [2, 1]  # dense row first, by bm25
+    by_id = await plugin.execute('search', {'table': _T, 'query': 'butter', 'order': 'id'}, _ctx())
+    assert [r['id'] for r in _rows(by_id)] == [1, 2]  # insertion order
+
+
+async def test_search_without_define_fts_raises_actionable(plugin: DatabasePlugin) -> None:
+    """Skipping define_fts surfaces a DatabasePluginError, not raw sqlite3."""
+    await _define_default(plugin)
+    await plugin.execute('insert', {'table': _T, 'row': {'body': 'unindexed'}}, _ctx())
+    with pytest.raises(DatabasePluginError, match=r'no full-text index .* call define_fts first'):
+        await plugin.execute('search', {'table': _T, 'query': 'unindexed'}, _ctx())
+
+
+async def test_define_fts_rejects_changed_column_set(plugin: DatabasePlugin) -> None:
+    """Re-defining over a different column set is refused, not a silent
+    no-op that would leave new columns unindexed (PR #24 review)."""
+    await plugin.execute(
+        'define_table',
+        {'table': _T, 'columns': {'body': {'type': 'text'}, 'note': {'type': 'text'}}},
+        _ctx(),
+    )
+    await plugin.execute('define_fts', {'table': _T, 'columns': ['body']}, _ctx())
+    with pytest.raises(DatabasePluginError, match='already exists over columns'):
+        await plugin.execute('define_fts', {'table': _T, 'columns': ['body', 'note']}, _ctx())
+    # Same column set is still idempotent (no raise).
+    await plugin.execute('define_fts', {'table': _T, 'columns': ['body']}, _ctx())
+
+
 async def test_search_treats_fts5_metacharacters_as_literal_terms(plugin: DatabasePlugin) -> None:
     """A query full of FTS5 syntax must not error or inject — just no match."""
     await _fts_ready(plugin, 'plain note')

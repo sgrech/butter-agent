@@ -240,6 +240,18 @@ class DatabasePlugin:
         await self._assert_indexable(table, columns)
 
         fts = f'{table}_fts'
+        # `CREATE VIRTUAL TABLE IF NOT EXISTS` (and the `IF NOT EXISTS`
+        # triggers) would silently no-op if an index already exists with
+        # a *different* column set, leaving the requested columns
+        # unindexed while the call reports success — a silent
+        # correctness bug. Detect a shape mismatch and refuse: changing
+        # the indexed columns means dropping and rebuilding the index,
+        # which is out of scope for v1 (spec §5).
+        existing = await self._existing_fts_columns(fts)
+        if existing is not None and existing != columns:
+            raise DatabasePluginError(
+                f'full-text index for {table!r} already exists over columns {existing!r}; cannot redefine it over {columns!r} (drop-and-rebuild is unsupported in v1)',
+            )
         col_sql = ', '.join(columns)
         col_new = ', '.join(f'new.{c}' for c in columns)
         col_old = ', '.join(f'old.{c}' for c in columns)
@@ -286,10 +298,13 @@ class DatabasePlugin:
         inject (spec §5).
         """
         table = _table(inputs)
+        fts = f'{table}_fts'
         match = _fts_match_expression(inputs.get('query'))
-        order = _fts_order(inputs.get('order'))
+        order = _fts_order(inputs.get('order'), fts)
 
-        sql = f'SELECT b.* FROM {table} b JOIN {table}_fts f ON b.id = f.rowid WHERE {table}_fts MATCH ? ORDER BY {order}'
+        # The FTS table is referenced by name (not aliased): bm25() and
+        # the MATCH operator both require the real FTS5 table name.
+        sql = f'SELECT b.* FROM {table} b JOIN {fts} ON b.id = {fts}.rowid WHERE {fts} MATCH ? ORDER BY {order}'
         params: list[object] = [match]
 
         limit = inputs.get('limit')
@@ -299,7 +314,19 @@ class DatabasePlugin:
             sql += ' LIMIT ?'
             params.append(limit)
 
-        return {'rows': await self._db.query(sql, tuple(params))}
+        try:
+            rows = await self._db.query(sql, tuple(params))
+        except sqlite3.OperationalError as exc:
+            # No FTS index for this table — the caller skipped
+            # define_fts. Surface the consistent, actionable
+            # DatabasePluginError the rest of this plugin raises, not a
+            # raw "no such table: …_fts" sqlite3 error.
+            if 'no such table' in str(exc) and fts in str(exc):
+                raise DatabasePluginError(
+                    f'no full-text index for {table!r} — call define_fts first',
+                ) from exc
+            raise
+        return {'rows': rows}
 
     async def _assert_indexable(self, table: str, columns: list[str]) -> None:
         """Reject FTS over a missing table, missing column, or non-text column.
@@ -325,6 +352,18 @@ class DatabasePlugin:
                 raise DatabasePluginError(
                     f'column {column!r} is {col_type or "untyped"}, not text — only text columns are full-text indexable',
                 )
+
+    async def _existing_fts_columns(self, fts: str) -> list[str] | None:
+        """Return an existing FTS index's columns in order, or None.
+
+        `PRAGMA table_info` on an FTS5 virtual table lists its indexed
+        columns; an empty result means the index does not exist yet.
+        Used to detect a redefinition with a changed column set.
+        """
+        info = await self._db.query(f'PRAGMA table_info({fts})', ())
+        if not info:
+            return None
+        return [str(row['name']) for row in info]
 
 
 # Capability name → handler. Defined after the class so the methods
@@ -407,15 +446,20 @@ def _fts_match_expression(query: object) -> str:
     return ' '.join(f'"{t.replace(chr(34), chr(34) * 2)}"*' for t in terms)
 
 
-def _fts_order(order: object) -> str:
+def _fts_order(order: object, fts: str) -> str:
     """Resolve the `order` input to a safe ORDER BY clause.
 
-    `rank` (default) is FTS5's bm25 relevance — best matches first.
-    `id` is oldest-first, matching `select`/`list`. Any other value is
-    rejected rather than interpolated.
+    `rank` (default) → `bm25(<fts table>)`, FTS5 relevance, best first.
+    The bare `rank` shorthand is deliberately NOT used: when the base
+    table happens to have a column named `rank`, `ORDER BY rank` is
+    `ambiguous column name: rank` (the JOIN brings both into scope), and
+    `bm25()` also requires the real FTS table name — an alias raises
+    `no such column`. `id` is oldest-first, matching `select`/`list`.
+    Any other value is rejected rather than interpolated. `fts` is the
+    `_ident`-validated `{table}_fts` name, safe to interpolate.
     """
     if order is None or order == 'rank':
-        return 'rank'
+        return f'bm25({fts})'
     if order == 'id':
         return 'b.id'
     raise DatabasePluginError(f"input 'order' must be 'rank' or 'id', got {order!r}")

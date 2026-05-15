@@ -12,7 +12,7 @@ This spec covers **lexical** full-text search only (SQLite FTS5). **Semantic** s
 
 - Two new `database` capabilities: `database.define_fts` and `database.search`, both `internal: true` (planner-invisible, plugin-to-plugin only) like the rest of the `database` surface.
 - **External-content FTS5** index (`content='{table}'`, `content_rowid='id'`) plus AFTER INSERT/UPDATE/DELETE sync triggers, so the base table keeps its typed schema, surrogate `id`, and `NOT NULL` columns unchanged. The existing `define_table`/`insert`/`update`/`delete` contract is untouched.
-- Idempotent index definition (`CREATE VIRTUAL TABLE IF NOT EXISTS` + `CREATE TRIGGER IF NOT EXISTS`), mirroring `define_table`'s idempotency.
+- Idempotent index definition (`CREATE VIRTUAL TABLE IF NOT EXISTS` + `CREATE TRIGGER IF NOT EXISTS`), mirroring `define_table`'s idempotency — for the **same** column set. A redefinition with a *different* column set is rejected, not silently no-op'd (§5).
 - One-time backfill of rows that predate the index, via FTS5's `'rebuild'` command, run inside `define_fts`.
 - Injection-proof, syntax-error-proof query handling: the caller passes natural text; the plugin builds the FTS5 MATCH expression. The caller never hand-writes FTS5 query syntax.
 - Stays `blast_radius = "local-write"` — DDL + local index maintenance, no new IO surface, no invariant #7 expansion.
@@ -56,8 +56,8 @@ Both capabilities are `internal: true`; `blast_radius` stays the plugin-level `l
 
 | Capability | Inputs | Outputs | Notes |
 |------------|--------|---------|-------|
-| `database.define_fts` | `table: str`, `columns: list[str]` | `{table: str}` | Idempotent. Base table must already exist (`define_table` first) — else `DatabasePluginError`. Creates the FTS index + 3 triggers `IF NOT EXISTS`, then runs the one-time `'rebuild'` backfill. Returns the fully-qualified base table name. |
-| `database.search` | `table: str`, `query: str`, `limit?: int`, `order?: "rank" \| "id"` | `{rows: list[dict]}` | Same row shape as `select` (whole base rows, `SELECT b.*`). `order` defaults to `"rank"` (bm25, most-relevant first); `"id"` gives oldest-first parity with `select`/`list`. `limit` is a non-negative int, validated exactly as `select`'s. |
+| `database.define_fts` | `table: str`, `columns: list[str]` | `{table: str}` | Idempotent for the **same** `columns`. Base table must already exist (`define_table` first) — else `DatabasePluginError`. A call against an index that already exists over a **different** column set is rejected with `DatabasePluginError` (drop-and-rebuild is unsupported in v1) rather than silently leaving the old index in place. Creates the FTS index + 3 triggers `IF NOT EXISTS`, then runs the one-time `'rebuild'` backfill. Returns the fully-qualified base table name. |
+| `database.search` | `table: str`, `query: str`, `limit?: int`, `order?: "rank" \| "id"` | `{rows: list[dict]}` | Same row shape as `select` (whole base rows, `SELECT b.*`). `order` defaults to `"rank"`, emitted as `bm25({ns}_fts)` — **not** the bare `rank` shorthand, which is `ambiguous column name` when the base table has a `rank` column. `"id"` gives oldest-first parity with `select`/`list`. `limit` validated exactly as `select`'s. Searching a table with no FTS index (caller skipped `define_fts`) raises a consistent `DatabasePluginError` ("no full-text index for …— call define_fts first"), never a raw `sqlite3` "no such table" error. |
 
 ### Query construction (the safety boundary)
 
