@@ -1,8 +1,8 @@
 # Notes Plugin Spec
 
 > **Status: externalized.** Notes was implemented as a core built-in
-> (PR #22) then moved to its own repo per
-> `plugin-externalization.md` — it now lives at
+> (PR #22) then moved to its own repo per the now-completed
+> `specs/archive/plugin-externalization.md` — it now lives at
 > [`butter-plugin-notes`](https://github.com/sgrech/butter-plugin-notes)
 > (`v0.1.0`), loaded via a `config.toml` `[[plugin]]` declaration. This
 > spec remains the authoritative description of the *capability* (data

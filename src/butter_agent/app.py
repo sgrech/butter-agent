@@ -100,7 +100,7 @@ async def build_repl(
     that `require` it resolve at build. Opinionated, planner-visible
     capabilities (notes, reminders, search) are NOT bundled — they are
     standalone repos the operator opts into via `config.toml`
-    (`PluginLoader`); see `specs/development/plugin-externalization.md`.
+    (`PluginLoader`); see `specs/archive/plugin-externalization.md`.
     With no `[[plugin]]` declared, only `database` (all-internal) is
     registered and the model receives an empty user-facing capability
     list, which the system prompt teaches it to handle honestly.

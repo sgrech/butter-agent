@@ -1,5 +1,11 @@
 # Plugin Externalization Spec
 
+**Status**: completed — archived. The notes plugin was extracted to
+[`butter-plugin-notes`](https://github.com/sgrech/butter-plugin-notes)
+and core's bundled copy removed (commits `cd30f55`, `56ee50e`). Retained
+as the historical record of the extraction procedure and the
+bundled-vs-external rule; not a live roadmap.
+
 ## 1. Purpose
 
 Establish the rule for **what ships in butter-agent core versus what lives
