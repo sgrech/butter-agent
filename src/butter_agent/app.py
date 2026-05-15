@@ -33,6 +33,7 @@ from butter_agent.core.repl import InputSource, Output, Repl, ReplGateHandler, S
 from butter_agent.core.task_executor import DefaultTaskExecutor
 from butter_agent.model.ollama import OllamaModelClient
 from butter_agent.plugins.database import build_database_plugin
+from butter_agent.plugins.notes import build_notes_plugin
 from butter_agent.repl_prompt_toolkit import InferenceIndicator, PromptToolkitInputSource
 from butter_agent.storage.sqlite import Database
 
@@ -129,6 +130,14 @@ async def build_repl(
         # shadowed (invariants #6/#7).
         db_manifest, db_plugin = build_database_plugin(database)
         builder.register(db_manifest, db_plugin)
+        # `notes` is a bundled built-in (not a fetched source) and the
+        # first consumer of `database`. Registered after it so its
+        # `requires` targets resolve, and before external plugins so a
+        # third-party plugin claiming the name `notes` is rejected as a
+        # duplicate — built-in capability surface can't be shadowed
+        # (invariants #6/#7), same stance as `database` above.
+        notes_manifest, notes_plugin = build_notes_plugin()
+        builder.register(notes_manifest, notes_plugin)
         for entry in loaded:
             builder.register(entry.manifest, entry.plugin)
         registry = builder.build()
