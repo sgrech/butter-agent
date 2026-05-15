@@ -45,7 +45,7 @@ path = "~/.butter-agent/butter.db"
 # rejected at parse time — or a local `path` for development.
 #
 # [[plugin]]
-# source = "github.com/sgrech/butter-plugin-notes@v0.1.0"
+# source = "github.com/sgrech/butter-plugin-notes@v0.3.0"
 #
 # [[plugin]]
 # source = "github.com/sgrech/butter-plugin-clock@v0.2.0"
