@@ -32,6 +32,7 @@ schema. The spec doc is updated to match.
 from __future__ import annotations
 
 import re
+import sqlite3
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Final
@@ -60,6 +61,17 @@ _TYPE_MAP: Final[dict[str, str]] = {
     'blob': 'BLOB',
     'datetime': 'TEXT',
 }
+
+
+#: Fixed FTS5 tokenizer (spec database-fts.md §4). `porter` stems
+#: ("dentists"→"dentist"), `unicode61` is the default word tokenizer,
+#: `remove_diacritics 2` folds accents. Not caller-configurable in v1.
+_FTS_TOKENIZE: Final = 'porter unicode61 remove_diacritics 2'
+
+#: Declared types (from `define_table`'s ColumnSpec) that land in a TEXT
+#: SQLite column and are therefore valid FTS index columns. `_TYPE_MAP`
+#: maps both to 'TEXT'; FTS only makes sense over text.
+_FTS_INDEXABLE_TYPES: Final = frozenset({'TEXT'})
 
 
 @dataclass(frozen=True, slots=True)
@@ -211,6 +223,148 @@ class DatabasePlugin:
         )
         return {'deleted': result.row_count}
 
+    async def _define_fts(self, inputs: dict[str, object]) -> dict[str, object]:
+        """Create (idempotently) an external-content FTS5 index + sync triggers.
+
+        The base table keeps its typed schema, surrogate `id`, and
+        NOT NULL columns untouched: the index is a separate
+        `{table}_fts` virtual table referencing base rows by rowid
+        (`content_rowid='id'`). AFTER INSERT/UPDATE/DELETE triggers keep
+        it live so every later `insert`/`update`/`delete` — through this
+        plugin or not — stays consistent. A final `'rebuild'` backfills
+        rows that predate the index (the migration step for an existing
+        table). Spec: database-fts.md §4-5, §8.
+        """
+        table = _table(inputs)
+        columns = _require_fts_columns(inputs)
+        await self._assert_indexable(table, columns)
+
+        fts = f'{table}_fts'
+        # `CREATE VIRTUAL TABLE IF NOT EXISTS` (and the `IF NOT EXISTS`
+        # triggers) would silently no-op if an index already exists with
+        # a *different* column set, leaving the requested columns
+        # unindexed while the call reports success — a silent
+        # correctness bug. Detect a shape mismatch and refuse: changing
+        # the indexed columns means dropping and rebuilding the index,
+        # which is out of scope for v1 (spec §5).
+        existing = await self._existing_fts_columns(fts)
+        if existing is not None and existing != columns:
+            raise DatabasePluginError(
+                f'full-text index for {table!r} already exists over columns {existing!r}; cannot redefine it over {columns!r} (drop-and-rebuild is unsupported in v1)',
+            )
+        col_sql = ', '.join(columns)
+        col_new = ', '.join(f'new.{c}' for c in columns)
+        col_old = ', '.join(f'old.{c}' for c in columns)
+
+        try:
+            await self._db.execute_ddl(
+                f"CREATE VIRTUAL TABLE IF NOT EXISTS {fts} USING fts5({col_sql}, content='{table}', content_rowid='id', tokenize='{_FTS_TOKENIZE}')",
+            )
+        except sqlite3.OperationalError as exc:
+            # The build's SQLite lacks the fts5 module. Fail loudly with
+            # an actionable message — never silently fall back to a slow
+            # table scan (spec §6: no silent fallback).
+            if 'fts5' in str(exc) or 'no such module' in str(exc):
+                raise DatabasePluginError(
+                    'full-text search unavailable: this SQLite build has no FTS5 module',
+                ) from exc
+            raise
+
+        # External-content sync triggers (SQLite FTS5 docs §4.4.3). The
+        # `'delete'` command row removes the stale index entry before a
+        # re-insert on UPDATE.
+        await self._db.execute_ddl(
+            f'CREATE TRIGGER IF NOT EXISTS {table}_ai AFTER INSERT ON {table} BEGIN INSERT INTO {fts}(rowid, {col_sql}) VALUES (new.id, {col_new}); END',
+        )
+        await self._db.execute_ddl(
+            f"CREATE TRIGGER IF NOT EXISTS {table}_ad AFTER DELETE ON {table} BEGIN INSERT INTO {fts}({fts}, rowid, {col_sql}) VALUES('delete', old.id, {col_old}); END",
+        )
+        await self._db.execute_ddl(
+            f"CREATE TRIGGER IF NOT EXISTS {table}_au AFTER UPDATE ON {table} BEGIN INSERT INTO {fts}({fts}, rowid, {col_sql}) VALUES('delete', old.id, {col_old}); INSERT INTO {fts}(rowid, {col_sql}) VALUES (new.id, {col_new}); END",
+        )
+        # Backfill rows written before the index existed. Cheap at our
+        # single-user scale and safe to repeat, so it runs every call
+        # rather than needing first-creation detection (spec §8).
+        await self._db.execute(f"INSERT INTO {fts}({fts}) VALUES('rebuild')", ())
+        return {'table': table}
+
+    async def _search(self, inputs: dict[str, object]) -> dict[str, object]:
+        """Full-text query over a `define_fts`'d table.
+
+        `query` is natural text — never FTS5 syntax. Terms are quoted
+        (neutralising every FTS5 metacharacter), prefix-globbed, and
+        AND-joined here, then bound as a parameter, so a caller can pass
+        a raw user phrase without escaping and it can neither error nor
+        inject (spec §5).
+        """
+        table = _table(inputs)
+        fts = f'{table}_fts'
+        match = _fts_match_expression(inputs.get('query'))
+        order = _fts_order(inputs.get('order'), fts)
+
+        # The FTS table is referenced by name (not aliased): bm25() and
+        # the MATCH operator both require the real FTS5 table name.
+        sql = f'SELECT b.* FROM {table} b JOIN {fts} ON b.id = {fts}.rowid WHERE {fts} MATCH ? ORDER BY {order}'
+        params: list[object] = [match]
+
+        limit = inputs.get('limit')
+        if limit is not None:
+            if not isinstance(limit, int) or isinstance(limit, bool) or limit < 0:
+                raise DatabasePluginError(f'limit must be a non-negative integer, got {limit!r}')
+            sql += ' LIMIT ?'
+            params.append(limit)
+
+        try:
+            rows = await self._db.query(sql, tuple(params))
+        except sqlite3.OperationalError as exc:
+            # No FTS index for this table — the caller skipped
+            # define_fts. Surface the consistent, actionable
+            # DatabasePluginError the rest of this plugin raises, not a
+            # raw "no such table: …_fts" sqlite3 error.
+            if 'no such table' in str(exc) and fts in str(exc):
+                raise DatabasePluginError(
+                    f'no full-text index for {table!r} — call define_fts first',
+                ) from exc
+            raise
+        return {'rows': rows}
+
+    async def _assert_indexable(self, table: str, columns: list[str]) -> None:
+        """Reject FTS over a missing table, missing column, or non-text column.
+
+        Surfaces a descriptive error here rather than letting a later
+        `CREATE VIRTUAL TABLE` / trigger fail opaquely. `table` is already
+        the `_ident`-validated FQ name so the PRAGMA interpolation is safe.
+        """
+        info = await self._db.query(f'PRAGMA table_info({table})', ())
+        by_name = {row['name']: row for row in info}
+        if not by_name:
+            raise DatabasePluginError(f'base table {table!r} does not exist — call define_table first')
+        if 'id' not in by_name:
+            # content_rowid='id' binds the index to the surrogate key;
+            # a caller-owned non-id primary key has no FTS support in v1.
+            raise DatabasePluginError(f"table {table!r} has no surrogate 'id' column — FTS requires the auto key")
+        for column in columns:
+            row = by_name.get(column)
+            if row is None:
+                raise DatabasePluginError(f'cannot index unknown column {column!r} on {table!r}')
+            col_type = str(row['type']).upper()
+            if col_type not in _FTS_INDEXABLE_TYPES:
+                raise DatabasePluginError(
+                    f'column {column!r} is {col_type or "untyped"}, not text — only text columns are full-text indexable',
+                )
+
+    async def _existing_fts_columns(self, fts: str) -> list[str] | None:
+        """Return an existing FTS index's columns in order, or None.
+
+        `PRAGMA table_info` on an FTS5 virtual table lists its indexed
+        columns; an empty result means the index does not exist yet.
+        Used to detect a redefinition with a changed column set.
+        """
+        info = await self._db.query(f'PRAGMA table_info({fts})', ())
+        if not info:
+            return None
+        return [str(row['name']) for row in info]
+
 
 # Capability name → handler. Defined after the class so the methods
 # exist; keeps `execute` a flat dispatch with no if/elif ladder.
@@ -222,6 +376,8 @@ _HANDLERS: Final[dict[str, _Handler]] = {
     'select': DatabasePlugin._select,
     'update': DatabasePlugin._update,
     'delete': DatabasePlugin._delete,
+    'define_fts': DatabasePlugin._define_fts,
+    'search': DatabasePlugin._search,
 }
 
 
@@ -256,6 +412,57 @@ def _require_mapping(inputs: dict[str, object], key: str, *, allow_empty: bool) 
     if not allow_empty and not value:
         raise DatabasePluginError(f'input {key!r} must not be empty')
     return value
+
+
+def _require_fts_columns(inputs: dict[str, object]) -> list[str]:
+    """Validate `columns` is a non-empty list of identifier strings.
+
+    Existence + text-ness against the live base schema is checked
+    separately by `_assert_indexable`; this is the shape/charset gate
+    (the SQL-injection boundary for the FTS column list, same `_ident`
+    rule the rest of the plugin uses).
+    """
+    value = inputs.get('columns')
+    if not isinstance(value, list) or not value:
+        raise DatabasePluginError("input 'columns' must be a non-empty list of column names")
+    return [_ident(c, 'column') for c in value]
+
+
+def _fts_match_expression(query: object) -> str:
+    """Build a safe FTS5 MATCH expression from natural text (spec §5).
+
+    Each whitespace term is wrapped as a quoted FTS5 string literal
+    (internal `"` doubled) with a `*` prefix-glob appended outside the
+    quotes — quoting neutralises every FTS5 metacharacter so a term can
+    never become an operator or a syntax error. Terms are space-joined
+    (implicit AND). The result is always bound as a parameter by the
+    caller, never interpolated.
+    """
+    if not isinstance(query, str):
+        raise DatabasePluginError(f"input 'query' must be a string, got {type(query).__name__}")
+    terms = query.split()
+    if not terms:
+        raise DatabasePluginError("input 'query' must contain at least one term")
+    return ' '.join(f'"{t.replace(chr(34), chr(34) * 2)}"*' for t in terms)
+
+
+def _fts_order(order: object, fts: str) -> str:
+    """Resolve the `order` input to a safe ORDER BY clause.
+
+    `rank` (default) → `bm25(<fts table>)`, FTS5 relevance, best first.
+    The bare `rank` shorthand is deliberately NOT used: when the base
+    table happens to have a column named `rank`, `ORDER BY rank` is
+    `ambiguous column name: rank` (the JOIN brings both into scope), and
+    `bm25()` also requires the real FTS table name — an alias raises
+    `no such column`. `id` is oldest-first, matching `select`/`list`.
+    Any other value is rejected rather than interpolated. `fts` is the
+    `_ident`-validated `{table}_fts` name, safe to interpolate.
+    """
+    if order is None or order == 'rank':
+        return f'bm25({fts})'
+    if order == 'id':
+        return 'b.id'
+    raise DatabasePluginError(f"input 'order' must be 'rank' or 'id', got {order!r}")
 
 
 def _optional_mapping(inputs: dict[str, object], key: str) -> dict[str, object]:
@@ -308,7 +515,7 @@ def build_database_plugin(database: Database) -> tuple[PluginManifest, DatabaseP
     """
     manifest = PluginManifest(
         name=PLUGIN_NAME,
-        version='1.0.0',
+        version='1.1.0',
         blast_radius=BlastRadius.LOCAL_WRITE,
         entrypoint='butter_agent.plugins.database:DatabasePlugin',
         capabilities=(
@@ -317,6 +524,8 @@ def build_database_plugin(database: Database) -> tuple[PluginManifest, DatabaseP
             _capability('select', {'table': 'string'}, {'rows': 'array'}),
             _capability('update', {'table': 'string', 'where': 'object', 'set': 'object'}, {'updated': 'integer'}),
             _capability('delete', {'table': 'string', 'where': 'object'}, {'deleted': 'integer'}),
+            _capability('define_fts', {'table': 'string', 'columns': 'array'}, {'table': 'string'}),
+            _capability('search', {'table': 'string', 'query': 'string'}, {'rows': 'array'}),
         ),
     )
     return manifest, DatabasePlugin(database)
