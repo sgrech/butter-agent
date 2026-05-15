@@ -19,16 +19,16 @@ Notes is butter-agent's first `local-write` plugin: persistent free-form note ca
 
 ### In Scope
 
-- Notes plugin capability surface (`create` / `list` / `read`)
-- Persistence via the `database` plugin (see `database-plugin.md`) — namespace-isolated to `notes__entries`
-- Manifest declaration: plugin-level `blast_radius=local-write`, `requires = ["database.define_table", "database.insert", "database.select"]`, per-capability `gate`
+- Notes plugin capability surface (`create` / `list` / `read` / `delete` / `search`)
+- Persistence via the `database` plugin (see `database-plugin.md`) — namespace-isolated to `notes__entries`; `search` is delegated to the host's FTS5-backed `database.search` (see `database-fts.md`)
+- Manifest declaration: plugin-level `blast_radius=local-write`, `requires = ["database.define_table", "database.insert", "database.select", "database.delete", "database.define_fts", "database.search"]`, per-capability `gate`
 - Live exercise of the gate-handler `confirm` path against a real model-emitted plan
 - Integration with `clock` plugin for chained plans (`clock.now → notes.create` using `$t.time`)
 
 ### Out of Scope
 
-- Cross-session note search / semantic indexing (deferred)
-- Note editing / versioning beyond create + read (deferred)
+- **Semantic** note search / vector indexing (deferred) — lexical full-text `search` is in scope as of v0.3.0 (delegated to the host's FTS5 `database.search`: porter-stemmed prefix terms, bm25 relevance); meaning/synonym search remains a separate, later concern (`database-fts.md` §7)
+- Note **editing** / content versioning (deferred) — `delete` exists as of v0.2.0; in-place mutation of an existing note's body does not
 - Multi-user / sharing concerns — butter-agent is single-user, local-first
 
 ## 3. User Stories
@@ -63,6 +63,10 @@ Plugin-level `blast_radius = "local-write"` (the strictest tier required across 
 | `notes.create` | `content: str` | `note_id: int`, `created_at: str` | `confirm` |
 | `notes.list` | `limit?: int` | `notes: list[{id, content, created_at}]` | `none` |
 | `notes.read` | `note_id: int` | `content: str`, `created_at: str` | `none` |
+| `notes.delete` | `note_id: int` | `note_id: int` | `confirm` |
+| `notes.search` | `query: str`, `limit?: int` | `notes: list[{id, content, created_at}]` | `none` |
+
+Capability history: `create`/`list`/`read` shipped in v0.1.0; `delete` + a substring `search` in v0.2.0; v0.3.0 re-implemented `search` on the host's FTS5 `database.search` (relevance-ordered, porter-stemmed prefix matching — **not** substring; ordering is bm25, not oldest-first). `delete` and `read` raise on an unknown `note_id` (the caller asked for a specific note that does not exist); `list`/`search` returning empty is a valid result, never an error.
 
 ## 6. Interactions
 
