@@ -33,7 +33,6 @@ from butter_agent.core.repl import InputSource, Output, Repl, ReplGateHandler, S
 from butter_agent.core.task_executor import DefaultTaskExecutor
 from butter_agent.model.ollama import OllamaModelClient
 from butter_agent.plugins.database import build_database_plugin
-from butter_agent.plugins.notes import build_notes_plugin
 from butter_agent.repl_prompt_toolkit import InferenceIndicator, PromptToolkitInputSource
 from butter_agent.storage.sqlite import Database
 
@@ -95,9 +94,16 @@ async def build_repl(
 ) -> App:
     """Compose a runnable `App` (Repl + database handle) from a validated `Config`.
 
-    Empty registry by design (v1) — `[[plugin]]` source-fetch lands in a
-    later scope. The model still receives an (empty) capabilities list,
-    which PR C's system-prompt update teaches it to handle honestly.
+    The registry is built built-ins-first: the shared `database`
+    infrastructure plugin is registered before any external `[[plugin]]`
+    declaration, so a third-party plugin cannot shadow it and plugins
+    that `require` it resolve at build. Opinionated, planner-visible
+    capabilities (notes, reminders, search) are NOT bundled — they are
+    standalone repos the operator opts into via `config.toml`
+    (`PluginLoader`); see `specs/development/plugin-externalization.md`.
+    With no `[[plugin]]` declared, only `database` (all-internal) is
+    registered and the model receives an empty user-facing capability
+    list, which the system prompt teaches it to handle honestly.
 
     `input_source` / `output` default to stdio; tests inject stubs so the
     full wiring can be exercised without touching the terminal. Passing
@@ -130,14 +136,8 @@ async def build_repl(
         # shadowed (invariants #6/#7).
         db_manifest, db_plugin = build_database_plugin(database)
         builder.register(db_manifest, db_plugin)
-        # `notes` is a bundled built-in (not a fetched source) and the
-        # first consumer of `database`. Registered after it so its
-        # `requires` targets resolve, and before external plugins so a
-        # third-party plugin claiming the name `notes` is rejected as a
-        # duplicate — built-in capability surface can't be shadowed
-        # (invariants #6/#7), same stance as `database` above.
-        notes_manifest, notes_plugin = build_notes_plugin()
-        builder.register(notes_manifest, notes_plugin)
+        # External plugins after the built-in infra so their `requires`
+        # (e.g. notes → database.*) resolve and they cannot shadow it.
         for entry in loaded:
             builder.register(entry.manifest, entry.plugin)
         registry = builder.build()

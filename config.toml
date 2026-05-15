@@ -38,8 +38,18 @@ think = false
 provider = "sqlite"
 path = "~/.butter-agent/butter.db"
 
-# External plugin sources. Each [[plugin]] entry requires a pinned ref —
-# branch refs (main / master / HEAD) are rejected at parse time.
+# External plugin sources. butter-agent ships no opinionated capability
+# bundled — only the internal `database` infra plugin is built in. Notes,
+# clock, etc. are standalone repos you opt into here. Each [[plugin]]
+# entry requires a pinned ref — branch refs (main/master/HEAD) are
+# rejected at parse time — or a local `path` for development.
 #
 # [[plugin]]
-# source = "github.com/example/notes@v0.1.0"
+# source = "github.com/sgrech/butter-plugin-notes@v0.1.0"
+#
+# [[plugin]]
+# source = "github.com/sgrech/butter-plugin-clock@v0.1.0"
+#
+# Local dev (used as-is, no fetch):
+# [[plugin]]
+# path = "~/Workspace/butter-plugin-notes"
