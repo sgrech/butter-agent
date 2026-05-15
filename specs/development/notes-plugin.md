@@ -36,6 +36,11 @@ Notes is butter-agent's first `local-write` plugin: persistent free-form note ca
 
 Schema lives in the shared `database` plugin under the namespaced table `notes__entries`. The notes plugin never sees raw SQL; it calls `ctx.call("database.define_table", ...)` once and `ctx.call("database.insert" | "database.select", ...)` for writes/reads. See `database-plugin.md` for the namespace-isolation rules.
 
+> **Constraints discovered in database slice 3 (memory-mcp 1430) — the next session must build to these, not the draft above:**
+> - Every `database.*` call addresses its table via a single **`table`** key (not `name`), passing the **bare** name (`"entries"`); core prefixes it to `notes__entries`. Notes never sends or sees the `notes__` prefix.
+> - ColumnSpec `default` is **advisory only — NOT emitted into DDL**. So `created_at default now` does **not** exist at the DB layer: `notes.create` must populate `created_at` itself (this is exactly what the `clock.now → notes.create($t.time)` variable-pool chain is for; without an upstream `clock.now`, notes generates the timestamp). `datetime` columns are stored as ISO-8601 **TEXT**.
+> - `update`/`delete` require a non-empty equality `where`; `select` `where` is optional, equality-only AND. A caller-supplied `table` containing `__` is rejected by core.
+
 ## 5. API Surface
 
 ### Capabilities
