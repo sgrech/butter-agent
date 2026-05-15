@@ -469,9 +469,9 @@ async def test_plugin_context_call_raises_plugin_context_error_for_undeclared_ta
 
 
 async def test_plugin_context_depth_ceiling_raises_before_dispatch() -> None:
-    """Defence-in-depth: at the nesting ceiling, `call` raises a recorded
-    `PluginContextError` rather than recursing into a `RecursionError` (a
-    `BaseException` that would escape the executor's catch and kill the REPL).
+    """Defence-in-depth: at the nesting ceiling, `call` fails fast with a
+    `PluginContextError` (named owner + capability) instead of recursing to
+    Python's recursion limit and surfacing an opaque deep `RecursionError`.
 
     Real cycles are unreachable (rejected at registry build), so the guard
     is exercised by constructing a context already at the ceiling depth.

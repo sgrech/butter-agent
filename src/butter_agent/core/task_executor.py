@@ -66,8 +66,12 @@ class PluginContextError(Exception):
 
 #: Hard ceiling on `PluginContext.call` nesting. The `requires` graph is a
 #: DAG (cycles rejected at registry build, invariant #1), so legitimate
-#: chains are short; this is pure defence-in-depth against a regressed
-#: build-time check turning into a REPL-killing `RecursionError`.
+#: chains are short. This is defence-in-depth: a regressed build-time check
+#: or a pathologically deep (still acyclic) chain would otherwise recurse
+#: until Python's own recursion limit and surface as an opaque deep
+#: `RecursionError` traceback with no plugin context. Failing fast here
+#: yields a `PluginContextError` that names the owner, capability, and the
+#: ceiling — actionable instead of cryptic.
 _MAX_CTX_DEPTH: int = 32
 
 
@@ -84,11 +88,14 @@ class _PluginContext:
     restricted to its own `requires` set. Cycles are impossible — the
     registry builder rejects `requires` cycles at startup (invariant #1), so
     this recursion always terminates. A `_MAX_CTX_DEPTH` ceiling is enforced
-    anyway: if that build-time invariant ever regressed, unbounded recursion
-    would raise `RecursionError` (a `BaseException`, *not* an `Exception`),
-    which the executor's broad plugin-failure catch would miss — tearing the
-    REPL down, the exact failure mode the 2026-05-14 correction forbids. The
-    ceiling converts that into a recorded `PluginContextError` instead.
+    anyway as defence-in-depth: a regressed build-time check or an
+    excessively deep (still acyclic) chain would otherwise recurse to
+    Python's recursion limit and surface as an opaque `RecursionError`. The
+    ceiling fails fast with a `PluginContextError` naming the owner and
+    capability — caught and recorded on the same plugin-failure path as any
+    other `Exception` (so the loop still synthesises; the 2026-05-14
+    correction holds), just with an actionable message instead of a cryptic
+    deep traceback.
 
     Namespacing of an internal store (e.g. the `database` plugin prefixing
     tables by caller) is deliberately *not* done here — that is task #381
@@ -133,7 +140,7 @@ class _PluginContext:
         """
         if self._depth >= _MAX_CTX_DEPTH:
             raise PluginContextError(
-                f'plugin {self._owner!r}: PluginContext.call nesting exceeded {_MAX_CTX_DEPTH} (calling {capability!r}) — a requires cycle that escaped registry-build validation',
+                f'plugin {self._owner!r}: PluginContext.call nesting exceeded {_MAX_CTX_DEPTH} (calling {capability!r}) — a requires cycle that escaped registry-build validation, or an excessively deep requires chain',
             )
 
         owner_manifest = self._registry.get(self._owner).manifest
