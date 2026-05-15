@@ -25,7 +25,9 @@ from butter_agent.core.registry import (
     RegistryBuilder,
 )
 from butter_agent.core.task_executor import (
+    _DB_TABLE_KEY,
     _MAX_CTX_DEPTH,
+    _NAMESPACED_DB_PLUGIN,
     AlwaysContinueGateHandler,
     DefaultTaskExecutor,
     Gate,
@@ -36,6 +38,7 @@ from butter_agent.core.task_executor import (
     VariableResolutionError,
     _PluginContext,
 )
+from butter_agent.plugins.database import PLUGIN_NAME as _DB_PLUGIN_NAME
 from tests.support import FakePluginContext
 
 # --- Plugin / registry test helpers -----------------------------------------
@@ -973,3 +976,143 @@ async def test_fake_plugin_context_unstubbed_capability_is_loud() -> None:
     ctx = FakePluginContext()
     with pytest.raises(AssertionError, match='no canned response'):
         await ctx.call('database.select', {})
+
+
+# --- Database namespace boundary (task #381 slice 3, invariant #6) -----------
+
+
+def test_core_db_constants_agree_with_plugin() -> None:
+    """Core's namespaced-plugin constant must equal the plugin's own name.
+
+    They are intentionally NOT a shared import (core has no dependency
+    edge on a plugin module); this test is the contract that stops the
+    two literals drifting apart.
+    """
+    assert _NAMESPACED_DB_PLUGIN == _DB_PLUGIN_NAME
+    assert _DB_TABLE_KEY == 'table'
+
+
+def _db_registry(owner_requires: tuple[str, ...] = ('database.insert',)) -> tuple[_RecordingPlugin, PluginRegistry]:
+    db = _RecordingPlugin(responses={'insert': {'id': 1}})
+    registry = _registry(
+        (
+            _manifest(
+                'database',
+                radius=BlastRadius.LOCAL_WRITE,
+                capabilities=(_cap('insert', internal=True),),
+            ),
+            db,
+        ),
+        (
+            _manifest(
+                'notes',
+                radius=BlastRadius.LOCAL_WRITE,
+                capabilities=(_cap('create'),),
+                requires=owner_requires,
+            ),
+            _RecordingPlugin(responses={}),
+        ),
+    )
+    return db, registry
+
+
+async def test_db_table_is_prefixed_with_caller_namespace() -> None:
+    """The database plugin receives `{caller}__{table}` — never the bare name."""
+    db = _RecordingPlugin(responses={'insert': {'id': 1}})
+    notes = _CallingPlugin(target='database.insert', inner_inputs={'table': 'entries', 'row': {'body': 'hi'}})
+    executor = _make_executor(
+        (
+            _manifest('database', radius=BlastRadius.LOCAL_WRITE, capabilities=(_cap('insert', internal=True),)),
+            db,
+        ),
+        (
+            _manifest(
+                'notes',
+                radius=BlastRadius.LOCAL_WRITE,
+                capabilities=(_cap('create'),),
+                requires=('database.insert',),
+            ),
+            notes,
+        ),
+    )
+
+    plan = TaskPlan(steps=(PlanStep(step=1, plugin='notes', capability='create', inputs={}, gate='none'),))
+    result = await executor.execute(plan)
+
+    assert result.failed_at_step is None
+    assert db.calls == [('insert', {'table': 'notes__entries', 'row': {'body': 'hi'}})]
+
+
+async def test_db_table_containing_separator_is_rejected() -> None:
+    """A caller-supplied name with the reserved `__` is refused (it would
+    let a plugin address another namespace). Surfaces as a step failure."""
+    db = _RecordingPlugin(responses={'insert': {'id': 1}})
+    notes = _CallingPlugin(target='database.insert', inner_inputs={'table': 'other__secret', 'row': {}})
+    executor = _make_executor(
+        (
+            _manifest('database', radius=BlastRadius.LOCAL_WRITE, capabilities=(_cap('insert', internal=True),)),
+            db,
+        ),
+        (
+            _manifest(
+                'notes',
+                radius=BlastRadius.LOCAL_WRITE,
+                capabilities=(_cap('create'),),
+                requires=('database.insert',),
+            ),
+            notes,
+        ),
+    )
+
+    plan = TaskPlan(steps=(PlanStep(step=1, plugin='notes', capability='create', inputs={}, gate='none'),))
+    result = await executor.execute(plan)
+
+    assert result.failed_at_step == 1
+    assert result.failure_reason is not None
+    assert 'PluginContextError' in result.failure_reason
+    assert '__' in result.failure_reason
+    # Rejected before the store was ever reached.
+    assert db.calls == []
+
+
+async def test_apply_db_namespace_rewrites_only_db_target() -> None:
+    """White-box: the hook prefixes for the db target, no-ops otherwise."""
+    _, registry = _db_registry()
+    ctx = _PluginContext(owner='notes', registry=registry, step=1)
+
+    db_inputs: dict[str, object] = {'table': 'entries', 'row': {'k': 1}}
+    ctx._apply_db_namespace('database', db_inputs)
+    assert db_inputs == {'table': 'notes__entries', 'row': {'k': 1}}
+
+    # Non-db target: untouched even if it has a `table` key.
+    other: dict[str, object] = {'table': 'entries'}
+    ctx._apply_db_namespace('clock', other)
+    assert other == {'table': 'entries'}
+
+    # db target but no `table` key: pass through (plugin raises its own
+    # missing-input error downstream).
+    no_table: dict[str, object] = {'row': {}}
+    ctx._apply_db_namespace('database', no_table)
+    assert no_table == {'row': {}}
+
+
+async def test_apply_db_namespace_rejects_non_string_table() -> None:
+    _, registry = _db_registry()
+    ctx = _PluginContext(owner='notes', registry=registry, step=1)
+    with pytest.raises(PluginContextError, match='must be a non-empty string'):
+        ctx._apply_db_namespace('database', {'table': 123})
+
+
+async def test_apply_db_namespace_rejects_owner_with_separator() -> None:
+    """Defence-in-depth: `parse_manifest` forbids `__` in plugin names, so
+    this is unreachable in a correct registry. Build one directly (bypassing
+    parse_manifest) to prove the core guard still refuses to mint an
+    ambiguous fully-qualified name if that validation ever regressed."""
+    db = _RecordingPlugin(responses={'insert': {}})
+    registry = _unchecked_registry(
+        (_manifest('database', radius=BlastRadius.LOCAL_WRITE, capabilities=(_cap('insert', internal=True),)), db),
+        (_manifest('a__b', capabilities=(_cap('go'),), requires=('database.insert',)), _RecordingPlugin(responses={})),
+    )
+    ctx = _PluginContext(owner='a__b', registry=registry, step=1)
+    with pytest.raises(PluginContextError, match='reserved to core'):
+        ctx._apply_db_namespace('database', {'table': 'entries'})

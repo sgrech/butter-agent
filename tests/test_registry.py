@@ -110,6 +110,19 @@ def test_parse_manifest_rejects_unsafe_plugin_name(bad_name: str) -> None:
         parse_manifest(bad)
 
 
+def test_parse_manifest_rejects_double_underscore_in_plugin_name() -> None:
+    """`__` passes the identifier charset but is the reserved database
+    namespace separator (`{plugin}__{table}`, invariant #6).
+
+    Allowing it would make a fully-qualified physical table name
+    ambiguous between two legitimate registrations. The separator must be
+    genuinely reserved to core, not reserved only by convention.
+    """
+    bad = _valid_toml(name='looks__legit')
+    with pytest.raises(ManifestError, match='reserved as the database namespace separator'):
+        parse_manifest(bad)
+
+
 @pytest.mark.parametrize(
     'bad_name',
     [

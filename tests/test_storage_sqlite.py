@@ -101,3 +101,36 @@ async def test_database_writer_lock_serialises_concurrent_writes(db: Database) -
     await asyncio.gather(*(db.execute('INSERT INTO t VALUES (?)', (i,)) for i in range(20)))
     rows = await db.fetchall('SELECT v FROM t', ())
     assert len({row[0] for row in rows}) == 20
+
+
+# --- execute_write / query (slice 3 primitives) -----------------------------
+
+
+async def test_execute_write_reports_insert_rowid(db: Database) -> None:
+    await db.execute_ddl('CREATE TABLE t (id INTEGER PRIMARY KEY AUTOINCREMENT, v TEXT)')
+    first = await db.execute_write('INSERT INTO t (v) VALUES (?)', ('a',))
+    second = await db.execute_write('INSERT INTO t (v) VALUES (?)', ('b',))
+    assert (first.last_row_id, first.row_count) == (1, 1)
+    assert (second.last_row_id, second.row_count) == (2, 1)
+
+
+async def test_execute_write_reports_affected_rowcount(db: Database) -> None:
+    await db.execute_ddl('CREATE TABLE t (id INTEGER PRIMARY KEY AUTOINCREMENT, k TEXT)')
+    for k in ('x', 'x', 'y'):
+        await db.execute_write('INSERT INTO t (k) VALUES (?)', (k,))
+    updated = await db.execute_write('UPDATE t SET k = ? WHERE k = ?', ('z', 'x'))
+    assert updated.row_count == 2
+    deleted = await db.execute_write('DELETE FROM t WHERE k = ?', ('z',))
+    assert deleted.row_count == 2
+
+
+async def test_query_returns_column_keyed_dicts(db: Database) -> None:
+    await db.execute_ddl('CREATE TABLE t (id INTEGER PRIMARY KEY AUTOINCREMENT, v TEXT)')
+    await db.execute_write('INSERT INTO t (v) VALUES (?)', ('hello',))
+    rows = await db.query('SELECT * FROM t', ())
+    assert rows == [{'id': 1, 'v': 'hello'}]
+
+
+async def test_query_empty_result_is_empty_list(db: Database) -> None:
+    await db.execute_ddl('CREATE TABLE t (id INTEGER PRIMARY KEY AUTOINCREMENT)')
+    assert await db.query('SELECT * FROM t', ()) == []
