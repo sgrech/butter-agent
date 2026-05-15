@@ -94,7 +94,7 @@ async def build_repl(
 ) -> App:
     """Compose a runnable `App` (Repl + database handle) from a validated `Config`.
 
-    The registry is built built-ins-first: the shared `database`
+    The registry is built with built-ins first: the shared `database`
     infrastructure plugin is registered before any external `[[plugin]]`
     declaration, so a third-party plugin cannot shadow it and plugins
     that `require` it resolve at build. Opinionated, planner-visible
