@@ -48,7 +48,7 @@ path = "~/.butter-agent/butter.db"
 # source = "github.com/sgrech/butter-plugin-notes@v0.1.0"
 #
 # [[plugin]]
-# source = "github.com/sgrech/butter-plugin-clock@v0.1.0"
+# source = "github.com/sgrech/butter-plugin-clock@v0.2.0"
 #
 # Local dev (used as-is, no fetch):
 # [[plugin]]
