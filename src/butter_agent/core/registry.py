@@ -235,6 +235,17 @@ def parse_manifest(toml_text: str) -> PluginManifest:
     name = _require_str(plugin_section, 'plugin.name')
     if not _IDENTIFIER_RE.match(name):
         raise ManifestError(f'plugin name {name!r}: {_IDENTIFIER_HINT}')
+    # The `__` digraph is the reserved separator in the database plugin's
+    # physical table names (`{plugin}__{table}`, invariant #6). The
+    # identifier charset alone permits it, which would make a
+    # fully-qualified name ambiguous between two legitimate registrations
+    # (e.g. plugin `a__b` vs a future composite). Forbid it in plugin
+    # names so the separator is genuinely reserved to core, not merely so
+    # by convention.
+    if '__' in name:
+        raise ManifestError(
+            f'plugin name {name!r}: must not contain "__" (the double-underscore is reserved as the database namespace separator)',
+        )
     version = _require_str(plugin_section, 'plugin.version', key='version')
     entrypoint = _require_str(plugin_section, 'plugin.entrypoint', key='entrypoint')
     radius_raw = _require_str(plugin_section, 'plugin.blast_radius', key='blast_radius')

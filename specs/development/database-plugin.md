@@ -54,11 +54,20 @@ All capabilities are flagged `internal: true` — invisible to the planner, call
 
 | Capability | Inputs | Outputs | Notes |
 |------------|--------|---------|-------|
-| `database.define_table` | `name: str`, `columns: dict[str, ColumnSpec]` | `{table: str}` | Idempotent. Returns the fully-qualified table name. |
+| `database.define_table` | `table: str`, `columns: dict[str, ColumnSpec]` | `{table: str}` | Idempotent. Returns the fully-qualified table name. |
 | `database.insert` | `table: str`, `row: dict` | `{id: int}` | Gate sits on the calling capability (e.g. `notes.create`), not here. |
 | `database.select` | `table: str`, `where?: dict`, `limit?: int`, `order_by?: str` | `{rows: list[dict]}` | `where` is equality-only for v1. |
 | `database.update` | `table: str`, `where: dict`, `set: dict` | `{updated: int}` | Same gate-on-caller rule. |
 | `database.delete` | `table: str`, `where: dict` | `{deleted: int}` | Same gate-on-caller rule. |
+
+> **Implementation note (slice 3):** every capability addresses its table
+> via a single `table` key — including `define_table` (the original draft
+> above used `name`). Uniform keying lets core namespace exactly one input
+> key for the one blessed plugin, instead of core carrying a
+> per-capability table-argument map and thereby coupling to this plugin's
+> schema. Namespacing happens in core's `_PluginContext` (using the
+> closed-over caller identity), so the plugin only ever sees the
+> fully-qualified `{caller}__{table}` name and holds zero identity logic.
 
 `ColumnSpec` (v1, minimal):
 

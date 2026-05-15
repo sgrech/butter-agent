@@ -32,6 +32,7 @@ from butter_agent.core.registry import RegistryBuilder, RegistryError
 from butter_agent.core.repl import InputSource, Output, Repl, ReplGateHandler, StdioInputSource, StdioOutput
 from butter_agent.core.task_executor import DefaultTaskExecutor
 from butter_agent.model.ollama import OllamaModelClient
+from butter_agent.plugins.database import build_database_plugin
 from butter_agent.repl_prompt_toolkit import InferenceIndicator, PromptToolkitInputSource
 from butter_agent.storage.sqlite import Database
 
@@ -121,6 +122,13 @@ async def build_repl(
     # them through the same friendly `[error] plugin: ...` path instead of
     # dumping a raw traceback.
     try:
+        # Built-in infrastructure first: the shared `database` store wraps
+        # the connection opened above. Registering it before external
+        # plugins means a third-party plugin claiming the name `database`
+        # is rejected as a duplicate — core infrastructure can't be
+        # shadowed (invariants #6/#7).
+        db_manifest, db_plugin = build_database_plugin(database)
+        builder.register(db_manifest, db_plugin)
         for entry in loaded:
             builder.register(entry.manifest, entry.plugin)
         registry = builder.build()

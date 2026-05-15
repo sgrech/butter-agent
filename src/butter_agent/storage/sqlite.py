@@ -23,9 +23,26 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
+from dataclasses import dataclass
 from pathlib import Path
 
 # --- Database ---------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class WriteResult:
+    """Outcome of a single write statement.
+
+    `last_row_id` is `cursor.lastrowid` (meaningful after an INSERT into a
+    table with a rowid / AUTOINCREMENT key; 0 otherwise). `row_count` is
+    `cursor.rowcount` — rows actually affected by an UPDATE / DELETE. Both
+    are captured from the *same* cursor under the *same* lock acquisition so
+    a concurrent writer cannot interleave between the write and a follow-up
+    `last_insert_rowid()` query.
+    """
+
+    last_row_id: int
+    row_count: int
 
 
 class Database:
@@ -80,6 +97,27 @@ class Database:
         async with self._lock:
             return await asyncio.to_thread(self._fetchall_sync, sql, params)
 
+    async def execute_write(self, sql: str, params: tuple[object, ...]) -> WriteResult:
+        """Run an INSERT / UPDATE / DELETE and report its rowid + rowcount.
+
+        Like `execute`, but returns a `WriteResult`. The lastrowid and
+        rowcount are read off the same cursor before the lock is released,
+        so an INSERT's id and an UPDATE's affected-row count are accurate
+        even under concurrent writers.
+        """
+        async with self._lock:
+            return await asyncio.to_thread(self._execute_write_sync, sql, params)
+
+    async def query(self, sql: str, params: tuple[object, ...]) -> list[dict[str, object]]:
+        """Run a SELECT and return rows as column-keyed dicts.
+
+        Built on the same locked path as `fetchall`; column names come from
+        `cursor.description` so callers that did `SELECT *` get named
+        fields without a separate schema lookup.
+        """
+        async with self._lock:
+            return await asyncio.to_thread(self._query_sync, sql, params)
+
     async def close(self) -> None:
         """Close the underlying connection.
 
@@ -100,6 +138,28 @@ class Database:
         cursor = self._connection.execute(sql, params)
         try:
             return cursor.fetchall()
+        finally:
+            cursor.close()
+
+    def _execute_write_sync(self, sql: str, params: tuple[object, ...]) -> WriteResult:
+        with self._connection:
+            cursor = self._connection.execute(sql, params)
+            try:
+                # lastrowid is None for statements that don't insert a rowid;
+                # rowcount is -1 when undetermined. Normalise both to ints so
+                # the WriteResult contract is total.
+                return WriteResult(
+                    last_row_id=cursor.lastrowid or 0,
+                    row_count=cursor.rowcount if cursor.rowcount >= 0 else 0,
+                )
+            finally:
+                cursor.close()
+
+    def _query_sync(self, sql: str, params: tuple[object, ...]) -> list[dict[str, object]]:
+        cursor = self._connection.execute(sql, params)
+        try:
+            columns = [d[0] for d in cursor.description] if cursor.description else []
+            return [dict(zip(columns, row, strict=True)) for row in cursor.fetchall()]
         finally:
             cursor.close()
 

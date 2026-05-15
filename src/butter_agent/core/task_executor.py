@@ -75,6 +75,22 @@ class PluginContextError(Exception):
 _MAX_CTX_DEPTH: int = 32
 
 
+#: Name of the built-in store whose `table` input core namespaces by caller
+#: identity before dispatch (task #381 slice 3, invariant #6 — hard
+#: isolation). Kept as a core constant rather than importing the plugin so
+#: core has no dependency edge on a plugin module. It MUST equal
+#: `butter_agent.plugins.database.PLUGIN_NAME`; a test asserts the two agree
+#: so the contract can't silently drift.
+_NAMESPACED_DB_PLUGIN: str = 'database'
+
+#: The single input key every `database.*` capability uses to name its
+#: table. Core rewrites exactly this key to `{caller}__{table}`; the plugin
+#: never sees the un-prefixed name or the caller (see database plugin
+#: module docstring). One key for one blessed plugin keeps this boundary
+#: from coupling core to the plugin's per-capability schema.
+_DB_TABLE_KEY: str = 'table'
+
+
 class _PluginContext:
     """The real per-invocation `PluginContext` (task #381 slice 2).
 
@@ -179,7 +195,46 @@ class _PluginContext:
         # code (invariant #6) and must not be able to mutate the caller's
         # dict. Mirrors the executor's defensive copies elsewhere and the
         # FakePluginContext test helper, so fake and real behave alike.
-        return await target.plugin.execute(target_capability, dict(inputs), child)
+        dispatch_inputs = dict(inputs)
+        self._apply_db_namespace(target_plugin, dispatch_inputs)
+        return await target.plugin.execute(target_capability, dispatch_inputs, child)
+
+    def _apply_db_namespace(self, target_plugin: str, inputs: dict[str, object]) -> None:
+        """Rewrite the database `table` input to the caller's namespace.
+
+        Invariant #6 in its strongest form: a plugin can only ever touch
+        `{its-own-name}__{table}`. The caller's namespace IS `self._owner`
+        — closed over by core, never an argument the caller can set,
+        override, or lie about. The `__` separator is reserved, so a
+        caller-supplied name containing it is rejected (otherwise
+        `notes` could pass `other__secret` and escape its namespace).
+
+        Mutates `inputs` in place (already a private per-dispatch copy).
+        No-op for any target other than the built-in store, and for a
+        call that omits `table` (the plugin then raises its own
+        missing-input error).
+        """
+        if target_plugin != _NAMESPACED_DB_PLUGIN or _DB_TABLE_KEY not in inputs:
+            return
+        if '__' in self._owner:
+            # parse_manifest forbids `__` in plugin names, so this is
+            # unreachable in a correctly built registry. Assert it anyway:
+            # if that validation ever regressed, an owner like `a__b` would
+            # silently collide with another namespace. Defence-in-depth,
+            # same stance as the internal-capability and depth guards.
+            raise PluginContextError(
+                f'plugin name {self._owner!r} contains "__" — the database namespace separator is reserved to core; registry validation should have rejected this',
+            )
+        table = inputs[_DB_TABLE_KEY]
+        if not isinstance(table, str) or not table:
+            raise PluginContextError(
+                f'plugin {self._owner!r}: database call {_DB_TABLE_KEY!r} must be a non-empty string, got {table!r}',
+            )
+        if '__' in table:
+            raise PluginContextError(
+                f'plugin {self._owner!r}: database table {table!r} may not contain "__" — the namespace separator is reserved to core',
+            )
+        inputs[_DB_TABLE_KEY] = f'{self._owner}__{table}'
 
 
 # --- Gate types --------------------------------------------------------------
