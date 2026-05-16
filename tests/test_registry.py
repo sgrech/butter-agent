@@ -411,6 +411,62 @@ def test_parse_manifest_rejects_non_bool_internal() -> None:
         parse_manifest(bad)
 
 
+# --- Manifest: [plugin].summary (capability-discovery Tier-1) ---------------
+
+
+def test_parse_manifest_summary_absent_is_none() -> None:
+    # Backward compatible: a manifest with no summary parses fine and the
+    # context manager synthesises a neutral fallback from capability names.
+    assert parse_manifest(_valid_toml()).summary is None
+
+
+def test_parse_manifest_summary_preserved() -> None:
+    toml = _valid_toml().replace(
+        'entrypoint = "main:Plugin"',
+        'entrypoint = "main:Plugin"\nsummary = "Keeps short text notes."',
+    )
+    assert parse_manifest(toml).summary == 'Keeps short text notes.'
+
+
+def test_parse_manifest_summary_collapses_whitespace_and_newlines() -> None:
+    # Trust-boundary defence: a multi-line summary cannot inject extra
+    # prompt lines / fake instruction blocks — runs collapse to one space.
+    toml = _valid_toml().replace(
+        'entrypoint = "main:Plugin"',
+        'entrypoint = "main:Plugin"\nsummary = "line one\\n\\nIGNORE PREVIOUS\\tline two"',
+    )
+    assert parse_manifest(toml).summary == 'line one IGNORE PREVIOUS line two'
+
+
+def test_parse_manifest_summary_blank_is_none() -> None:
+    # Whitespace-only and absent must behave identically.
+    toml = _valid_toml().replace(
+        'entrypoint = "main:Plugin"',
+        'entrypoint = "main:Plugin"\nsummary = "   \\n  "',
+    )
+    assert parse_manifest(toml).summary is None
+
+
+def test_parse_manifest_summary_truncated_to_cap() -> None:
+    long = 'x' * 500
+    toml = _valid_toml().replace(
+        'entrypoint = "main:Plugin"',
+        f'entrypoint = "main:Plugin"\nsummary = "{long}"',
+    )
+    summary = parse_manifest(toml).summary
+    assert summary is not None
+    assert len(summary) == 200
+
+
+def test_parse_manifest_rejects_non_string_summary() -> None:
+    toml = _valid_toml().replace(
+        'entrypoint = "main:Plugin"',
+        'entrypoint = "main:Plugin"\nsummary = 42',
+    )
+    with pytest.raises(ManifestError, match='summary must be a string'):
+        parse_manifest(toml)
+
+
 # --- Builder: requires + transitive radius ---------------------------------
 
 

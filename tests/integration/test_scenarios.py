@@ -40,8 +40,13 @@ from dataclasses import dataclass, field
 
 import pytest
 
-from butter_agent.core.context_manager import CapabilityDescriptor, DefaultContextManager, InMemoryConversationHistory
-from butter_agent.core.loop import AgentLoop, ModelContext, ModelOutput, ModelReply, PlanStep, TaskPlan
+from butter_agent.core.context_manager import (
+    CapabilityDescriptor,
+    DefaultContextManager,
+    InMemoryConversationHistory,
+    PluginIndexEntry,
+)
+from butter_agent.core.loop import AgentLoop, DiscoverySelection, ModelContext, ModelOutput, ModelReply, PlanStep, TaskPlan
 from butter_agent.core.registry import BlastRadius, Capability, PluginManifest, RegistryBuilder
 from butter_agent.core.repl import Repl, ReplGateHandler
 from butter_agent.core.task_executor import DefaultTaskExecutor
@@ -294,6 +299,104 @@ async def test_scenario_5_plain_chat_with_no_capability_match() -> None:
     # No plugin invocation, no plan attempted.
     assert plugin.calls == []
     assert 'chicken' in out.text
+
+
+# --- Capability discovery acceptance (spec migration step 4) ----------------
+
+
+class _RecordingPlugin:
+    """Records (capability, inputs); returns a canned dict per capability."""
+
+    def __init__(self, returns: dict[str, dict[str, object]]) -> None:
+        self._returns = returns
+        self.calls: list[tuple[str, dict[str, object]]] = []
+
+    async def execute(self, capability: str, inputs: dict[str, object], context: object) -> dict[str, object]:
+        del context
+        self.calls.append((capability, dict(inputs)))
+        return self._returns.get(capability, {})
+
+
+def _wide_manifest(name: str, caps: tuple[tuple[str, str, dict[str, object]], ...]) -> PluginManifest:
+    return PluginManifest(
+        name=name,
+        version='0.1.0',
+        blast_radius=BlastRadius.READ_ONLY,
+        entrypoint='test:Plugin',
+        capabilities=tuple(Capability(name=cn, description=cd, input_schema=ci, output_schema={}) for cn, cd, ci in caps),
+    )
+
+
+async def test_discovery_recovers_filesystem_registered_last() -> None:
+    """Spec acceptance: the 2026-05-15 failing prompt plans `filesystem.
+
+    read_file{path}` with `filesystem` registered LAST and sharing no
+    keyword with the request — the exact case `KeywordCapabilityFilter`
+    blanked (registration-order fallback). With discovery active the
+    model is shown a Tier-1 index naming `filesystem`, selects it, and
+    the Tier-2 context carries `read_file`'s schema (incl. required
+    `path`) regardless of registration position. The model is scripted —
+    this pins butter's plumbing, not model behaviour.
+    """
+    clock = _RecordingPlugin({'now': {'time': '15:00', 'tz': 'CEST'}})
+    notes = _RecordingPlugin({'create': {'id': 1}})
+    files = _RecordingPlugin({'read_file': {'content': '[project]\ndependencies = ["pytest"]'}})
+
+    builder = RegistryBuilder(max_blast_radius=BlastRadius.NETWORK)
+    builder.register(_clock_manifest(), clock)
+    builder.register(
+        _wide_manifest('notes', (('create', 'Create a note', {'body': 'string'}), ('list', 'List notes', {}), ('delete', 'Delete a note', {'id': 'integer'}))),
+        notes,
+    )
+    # filesystem registered LAST and intentionally keyword-disjoint from
+    # "what dependencies does pyproject have".
+    builder.register(
+        _wide_manifest(
+            'filesystem',
+            (
+                ('read_file', 'Return the contents of a file at a path', {'path': 'string'}),
+                ('list_dir', 'List entries in a directory', {'path': 'string'}),
+                ('write_file', 'Write contents to a path', {'path': 'string', 'content': 'string'}),
+            ),
+        ),
+        files,
+    )
+    registry = builder.build()
+    # 3 + 3 + 3 = 9 user-facing caps > default threshold 8, 3 plugins → active.
+    history = InMemoryConversationHistory()
+    context_manager = DefaultContextManager(registry, history, capability_discovery=True)
+    assert context_manager.discovery_active is True
+
+    model = _ScriptedModel(
+        outputs=deque(
+            [
+                DiscoverySelection(plugins=('filesystem',)),
+                TaskPlan(steps=(PlanStep(step=1, plugin='filesystem', capability='read_file', inputs={'path': 'pyproject.toml'}, gate='none', outputs_as='f'),)),
+                ModelReply(text='pyproject depends on pytest.'),
+            ],
+        ),
+    )
+    inp = _ScriptedInput(lines=deque(['what dependencies does pyproject have']))
+    out = _CapturingOutput()
+    executor = DefaultTaskExecutor(registry, ReplGateHandler(inp, out))
+    repl = Repl(AgentLoop(context_manager, model, executor, history=history), inp, out, banner='')
+
+    await repl.run()
+
+    # Tier-1 index named filesystem despite last registration / no keyword overlap.
+    tier1 = model.contexts_seen[0].payload['plugin_index']
+    assert isinstance(tier1, tuple)
+    assert any(isinstance(e, PluginIndexEntry) and e.name == 'filesystem' for e in tier1)
+    assert 'capabilities' not in model.contexts_seen[0].payload
+    # Tier-2 carried read_file's full schema, incl. required `path`.
+    tier2 = model.contexts_seen[1].payload['capabilities']
+    assert isinstance(tier2, tuple)
+    read_file = next(c for c in tier2 if isinstance(c, CapabilityDescriptor) and c.capability == 'read_file')
+    assert read_file.plugin == 'filesystem'
+    assert 'path' in read_file.required_inputs
+    # Plan executed against the real executor; synthesis replied.
+    assert files.calls == [('read_file', {'path': 'pyproject.toml'})]
+    assert 'pyproject depends on pytest.' in out.text
 
 
 # --- Live-model placeholder (opt-in via `-m live`) --------------------------

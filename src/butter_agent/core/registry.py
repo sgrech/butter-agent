@@ -94,6 +94,14 @@ class PluginManifest:
     the internal capabilities this plugin needs at runtime. The builder
     validates every entry resolves to an `internal=True` capability and that
     the resulting dependency graph is acyclic.
+
+    `summary` is the optional one-line plugin purpose surfaced in the
+    capability-discovery Tier-1 index. It is sanitised to a single line at
+    parse time (the trust boundary — third-party manifests are untrusted
+    prompt input, same stance as the identifier-charset restriction below);
+    `None` when the manifest omits it, in which case the context manager
+    generates a neutral fallback from the capability names. It is never
+    interpreted by core beyond rendering.
     """
 
     name: str
@@ -102,6 +110,7 @@ class PluginManifest:
     entrypoint: str
     capabilities: tuple[Capability, ...]
     requires: tuple[str, ...] = ()
+    summary: str | None = None
 
     def capability(self, name: str) -> Capability:
         """Look up a capability by name, raising if it does not exist."""
@@ -226,6 +235,21 @@ _IDENTIFIER_HINT = 'must match [a-z][a-z0-9_]* (lowercase letter, then lowercase
 # caught at parse time.
 _REQUIRES_REF_RE = re.compile(r'^([a-z][a-z0-9_]*)\.([a-z][a-z0-9_]*)$')
 
+# Plugin `summary` is third-party-authored prose rendered verbatim into
+# the discovery Tier-1 prompt. Two trust-boundary defences applied at
+# parse time (cf. the identifier-charset rule above — sanitise where
+# untrusted input enters core, not where it is consumed):
+#   - collapse every run of whitespace (incl. newlines/tabs) to one
+#     space so a manifest cannot inject extra prompt lines or fake
+#     instruction blocks via embedded "\n".
+#   - hard-cap the length so a pathological manifest cannot blow the
+#     Tier-1 token budget the index exists to keep small.
+_SUMMARY_WHITESPACE_RE = re.compile(r'\s+')
+# 200 Unicode code points (not bytes — a non-ASCII summary's UTF-8 byte
+# length is higher; revisit the unit when Tier-1 token measurement lands,
+# spec open-question / task #390).
+_SUMMARY_MAX_LEN: Final = 200
+
 
 def parse_manifest(toml_text: str) -> PluginManifest:
     """Parse a manifest.toml document and validate its shape.
@@ -278,6 +302,7 @@ def parse_manifest(toml_text: str) -> PluginManifest:
     _ensure_unique_capability_names(name, capabilities)
 
     requires = _parse_requires(name, plugin_section.get('requires', []))
+    summary = _parse_summary(name, plugin_section.get('summary'))
 
     return PluginManifest(
         name=name,
@@ -286,7 +311,27 @@ def parse_manifest(toml_text: str) -> PluginManifest:
         entrypoint=entrypoint,
         capabilities=capabilities,
         requires=requires,
+        summary=summary,
     )
+
+
+def _parse_summary(plugin_name: str, raw: object) -> str | None:
+    """Validate and sanitise the optional `[plugin].summary`.
+
+    Absent → `None` (the context manager synthesises a neutral fallback).
+    Present → must be a string; whitespace runs are collapsed to single
+    spaces and the result is truncated to `_SUMMARY_MAX_LEN`. An empty or
+    whitespace-only string is treated as absent rather than rejected — a
+    blank summary and no summary should behave identically.
+    """
+    if raw is None:
+        return None
+    if not isinstance(raw, str):
+        raise ManifestError(f'plugin {plugin_name!r}: summary must be a string')
+    collapsed = _SUMMARY_WHITESPACE_RE.sub(' ', raw).strip()
+    if not collapsed:
+        return None
+    return collapsed[:_SUMMARY_MAX_LEN].rstrip()
 
 
 def _parse_requires(plugin_name: str, raw: object) -> tuple[str, ...]:

@@ -26,8 +26,10 @@ from butter_agent.core.context_manager import (
     CapabilityDescriptor,
     ConversationEntry,
     MemorySnippet,
+    PluginIndexEntry,
 )
 from butter_agent.core.loop import (
+    DiscoverySelection,
     ExecutionResult,
     ModelContext,
     ModelProtocolError,
@@ -257,7 +259,7 @@ async def test_plan_rejects_non_string_gate() -> None:
 
 async def test_unknown_type_rejected() -> None:
     client, _ = _client(_ollama_response({'type': 'mystery'}))
-    with pytest.raises(ModelProtocolError, match="'type' must be 'reply' or 'plan'"):
+    with pytest.raises(ModelProtocolError, match="'type' must be 'reply', 'plan', or 'discover'"):
         await client.generate(_ctx())
 
 
@@ -639,6 +641,78 @@ async def test_synthesis_rejects_non_execution_value() -> None:
     bad = _ctx('q', execution='not-an-execution')
     with pytest.raises(ModelProtocolError, match="'execution'"):
         await client.generate(bad)
+
+
+# --- Capability discovery (Tier-1) ------------------------------------------
+
+
+async def test_discovery_pass_uses_discovery_system_prompt() -> None:
+    # A `plugin_index` payload key swaps in the discovery system prompt:
+    # pick plugins, do not plan yet.
+    client, transport = _client(_ollama_response({'type': 'discover', 'plugins': ['notes']}))
+    await client.generate(_ctx('save a note', plugin_index=(PluginIndexEntry(name='notes', summary='Notes.'),)))
+    folded = _system_prompt(transport)
+    assert 'choose which plugins you need' in folded
+    assert 'NOT been shown individual capabilities' in folded
+    assert 'Do NOT return "type": "plan"' in folded
+
+
+async def test_discovery_prompt_renders_plugin_index() -> None:
+    client, transport = _client(_ollama_response({'type': 'discover', 'plugins': ['files']}))
+    index = (
+        PluginIndexEntry(name='notes', summary='Short text notes.'),
+        PluginIndexEntry(name='files', summary='Read and write local files.'),
+    )
+    await client.generate(_ctx('what deps does pyproject have', plugin_index=index))
+    user_msg = _user_message(transport)
+    assert 'Available plugins:' in user_msg
+    assert '- "notes": Short text notes.' in user_msg
+    assert '- "files": Read and write local files.' in user_msg
+    assert 'Available capabilities:' not in user_msg
+
+
+async def test_discovery_prompt_renders_empty_index_explicitly() -> None:
+    # An empty index must surface "(none)" so the model admits it has no
+    # plugins rather than confabulating one — same honesty guard the
+    # capability list uses.
+    client, transport = _client(_ollama_response({'type': 'reply', 'text': 'I have no plugins.'}))
+    await client.generate(_ctx('do something', plugin_index=()))
+    user_msg = _user_message(transport)
+    assert 'Available plugins:' in user_msg
+    assert '(none)' in user_msg
+
+
+async def test_parses_discovery_selection() -> None:
+    client, _ = _client(_ollama_response({'type': 'discover', 'plugins': ['files', 'clock']}))
+    result = await client.generate(_ctx('q', plugin_index=()))
+    assert result == DiscoverySelection(plugins=('files', 'clock'))
+
+
+async def test_parses_empty_discovery_selection() -> None:
+    # Structurally valid — the context manager treats an empty selection
+    # as the keyword-filter fallback, so this is not an adapter error.
+    client, _ = _client(_ollama_response({'type': 'discover', 'plugins': []}))
+    result = await client.generate(_ctx('q', plugin_index=()))
+    assert result == DiscoverySelection(plugins=())
+
+
+async def test_discovery_non_list_plugins_raises() -> None:
+    client, _ = _client(_ollama_response({'type': 'discover', 'plugins': 'files'}))
+    with pytest.raises(ModelProtocolError, match=r'discover\.plugins must be an array'):
+        await client.generate(_ctx('q', plugin_index=()))
+
+
+async def test_discovery_non_string_plugin_entry_raises() -> None:
+    client, _ = _client(_ollama_response({'type': 'discover', 'plugins': ['ok', 42]}))
+    with pytest.raises(ModelProtocolError, match=r'discover\.plugins\[1\]'):
+        await client.generate(_ctx('q', plugin_index=()))
+
+
+async def test_discovery_reply_still_parses() -> None:
+    # The discovery pass may also yield a plain reply (conversational turn).
+    client, _ = _client(_ollama_response({'type': 'reply', 'text': 'hello'}))
+    result = await client.generate(_ctx('hi', plugin_index=()))
+    assert result == ModelReply(text='hello')
 
 
 # --- Transport error wrapping (timeouts) ------------------------------------

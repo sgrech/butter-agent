@@ -26,7 +26,7 @@ from butter_agent.cli_commands.help import HelpCommand
 from butter_agent.cli_commands.quit import QuitCommand
 from butter_agent.cli_commands.status import StatusCommand
 from butter_agent.core.config import Config, CoreConfig, ModelConfig, PluginPath, PluginSource, StorageConfig, dump_config, load_config
-from butter_agent.core.loop import AgentLoop, ExecutionResult, ModelContext, ModelOutput, ModelReply, TaskPlan, Turn, TurnResult
+from butter_agent.core.loop import AgentLoop, DiscoverySelection, ExecutionResult, ModelContext, ModelOutput, ModelReply, TaskPlan, Turn, TurnResult
 from butter_agent.core.registry import BlastRadius
 from butter_agent.core.repl import CommandRegistry, CommandResult, Repl
 
@@ -66,7 +66,12 @@ def test_dump_config_roundtrips_defaults() -> None:
 
 def test_dump_config_roundtrips_custom_with_plugins() -> None:
     original = Config(
-        core=CoreConfig(max_blast_radius=BlastRadius.LOCAL_WRITE, network_allowlist=('example.com',)),
+        core=CoreConfig(
+            max_blast_radius=BlastRadius.LOCAL_WRITE,
+            network_allowlist=('example.com',),
+            capability_discovery=True,
+            discovery_capability_threshold=12,
+        ),
         model=ModelConfig(provider='ollama', model='qwen3:4b', host='http://localhost:11434'),
         storage=StorageConfig(provider='sqlite', path='/var/butter/db'),
         plugins=(PluginSource(repo='github.com/example/notes', ref='v0.1.0'),),
@@ -326,9 +331,15 @@ def test_command_registry_rejects_duplicates() -> None:
 @dataclass
 class _StubContextManager:
     payload: dict[str, object] = field(default_factory=dict)
+    discovery_active: bool = False
 
-    async def assemble(self, turn: Turn, execution: ExecutionResult | None = None) -> ModelContext:
-        del execution
+    async def assemble(
+        self,
+        turn: Turn,
+        execution: ExecutionResult | None = None,
+        selection: DiscoverySelection | None = None,
+    ) -> ModelContext:
+        del execution, selection
         return ModelContext(turn=turn, payload=dict(self.payload))
 
 

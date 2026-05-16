@@ -89,6 +89,40 @@ def test_core_rejects_non_string_radius() -> None:
         load_config('[core]\nmax_blast_radius = 3')
 
 
+def test_core_capability_discovery_defaults_off() -> None:
+    cfg = load_config('[core]\nmax_blast_radius = "network"')
+    assert cfg.core.capability_discovery is False
+    assert cfg.core.discovery_capability_threshold == 8
+
+
+def test_core_capability_discovery_overrides() -> None:
+    cfg = load_config(
+        """
+        [core]
+        capability_discovery = true
+        discovery_capability_threshold = 15
+        """,
+    )
+    assert cfg.core.capability_discovery is True
+    assert cfg.core.discovery_capability_threshold == 15
+
+
+def test_core_rejects_non_bool_capability_discovery() -> None:
+    with pytest.raises(ConfigError, match='capability_discovery: expected bool'):
+        load_config('[core]\ncapability_discovery = "yes"')
+
+
+def test_core_rejects_non_int_discovery_threshold() -> None:
+    # bool is an int subclass — guarded so `true` cannot pass as 1.
+    with pytest.raises(ConfigError, match='discovery_capability_threshold: expected integer'):
+        load_config('[core]\ndiscovery_capability_threshold = true')
+
+
+def test_core_rejects_negative_discovery_threshold() -> None:
+    with pytest.raises(ConfigError, match='discovery_capability_threshold: expected non-negative'):
+        load_config('[core]\ndiscovery_capability_threshold = -1')
+
+
 # --- Model section ----------------------------------------------------------
 
 

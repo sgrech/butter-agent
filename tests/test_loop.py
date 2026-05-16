@@ -17,6 +17,7 @@ from butter_agent.core.loop import (
     AgentLoop,
     ContextManager,
     ConversationLog,
+    DiscoverySelection,
     ExecutionResult,
     ModelClient,
     ModelContext,
@@ -32,14 +33,35 @@ from butter_agent.core.loop import (
 
 @dataclass
 class _StubContextManager:
-    calls: list[Turn]
+    """Records every `assemble` call's (turn, execution, selection).
 
-    async def assemble(self, turn: Turn, execution: ExecutionResult | None = None) -> ModelContext:
+    `discovery_active` defaults False so the legacy single-pass tests are
+    unchanged. Set it True to exercise the Tier-1 → Tier-2 path; the
+    payload mirrors `DefaultContextManager` shape (a `plugin_index` key on
+    the Tier-1 pass, `capabilities` on the Tier-2 pass) so assertions can
+    distinguish the passes.
+    """
+
+    calls: list[Turn]
+    discovery_active: bool = False
+    assembled: list[tuple[ExecutionResult | None, DiscoverySelection | None]] = field(default_factory=list)
+
+    async def assemble(
+        self,
+        turn: Turn,
+        execution: ExecutionResult | None = None,
+        selection: DiscoverySelection | None = None,
+    ) -> ModelContext:
         self.calls.append(turn)
+        self.assembled.append((execution, selection))
         # Mirror DefaultContextManager: history is a tuple, not a list.
         payload: dict[str, object] = {'history': ()}
         if execution is not None:
             payload['execution'] = execution
+        elif selection is not None:
+            payload['capabilities'] = ()
+        elif self.discovery_active:
+            payload['plugin_index'] = ()
         return ModelContext(turn=turn, payload=payload)
 
 
@@ -86,8 +108,9 @@ def _wire(
     *model_outputs: ModelOutput,
     executor_result: ExecutionResult | None = None,
     history: ConversationLog | None = None,
+    discovery_active: bool = False,
 ) -> tuple[AgentLoop, _StubContextManager, _StubModel, _StubExecutor]:
-    cm = _StubContextManager(calls=[])
+    cm = _StubContextManager(calls=[], discovery_active=discovery_active)
     model = _StubModel(outputs=deque(model_outputs))
     placeholder_plan = TaskPlan(steps=())
     executor = _StubExecutor(
@@ -269,6 +292,92 @@ async def test_model_protocol_error_propagates() -> None:
 
     with pytest.raises(ModelProtocolError, match='malformed output'):
         await loop.run_turn('hi')
+
+    assert executor.plans_seen == []
+
+
+async def test_discovery_selection_drives_tier2_plan_then_synthesis() -> None:
+    # Discovery active: model picks plugins (Tier-1), the loop re-assembles
+    # with that selection (Tier-2), the model plans, executor runs, synthesis
+    # replies. Three model calls; the second assemble carries the selection.
+    selection = DiscoverySelection(plugins=('filesystem',))
+    plan = TaskPlan(
+        steps=(PlanStep(step=1, plugin='filesystem', capability='read_file', inputs={'path': 'pyproject.toml'}, gate='none'),),
+    )
+    raw_execution = ExecutionResult(plan=plan, outputs={'f': {'content': 'x'}})
+    synthesis = ModelReply(text='pyproject lists pytest.')
+    loop, cm, model, executor = _wire(
+        selection,
+        plan,
+        synthesis,
+        executor_result=raw_execution,
+        discovery_active=True,
+    )
+
+    result = await loop.run_turn('what dependencies does pyproject have')
+
+    assert executor.plans_seen == [plan]
+    assert result.executed_plan is not None
+    assert result.executed_plan.synthesis_reply == synthesis
+    # discovery → planning → synthesis.
+    assert len(model.contexts_seen) == 3
+    # assemble: Tier-1 (no execution/selection), Tier-2 (selection set),
+    # synthesis (execution set).
+    assert cm.assembled[0] == (None, None)
+    assert cm.assembled[1] == (None, selection)
+    assert cm.assembled[2][0] is raw_execution
+    assert 'plugin_index' in model.contexts_seen[0].payload
+    assert 'capabilities' in model.contexts_seen[1].payload
+
+
+async def test_discovery_reply_short_circuits_without_planning() -> None:
+    # A purely conversational turn: the model replies at the discovery pass
+    # and the loop must not run a planning pass or the executor.
+    loop, cm, model, executor = _wire(
+        ModelReply(text='Hello!'),
+        discovery_active=True,
+    )
+
+    result = await loop.run_turn('hi')
+
+    assert result.reply == ModelReply(text='Hello!')
+    assert executor.plans_seen == []
+    assert len(model.contexts_seen) == 1
+    assert cm.assembled == [(None, None)]
+
+
+async def test_plan_from_discovery_pass_is_protocol_error() -> None:
+    # The model cannot plan before being shown Tier-2 schemas.
+    plan = TaskPlan(steps=(PlanStep(step=1, plugin='x', capability='y', inputs={}, gate='none'),))
+    loop, _, _, executor = _wire(plan, discovery_active=True)
+
+    with pytest.raises(ModelProtocolError, match='discovery pass must return a plugin selection'):
+        await loop.run_turn('go')
+
+    assert executor.plans_seen == []
+
+
+async def test_discovery_selection_from_planning_pass_is_protocol_error() -> None:
+    # Tier-2 must yield a reply or a plan — a second discovery selection
+    # means the model planned against detail it was not shown.
+    loop, _, _, _ = _wire(
+        DiscoverySelection(plugins=('a',)),
+        DiscoverySelection(plugins=('b',)),
+        discovery_active=True,
+    )
+
+    with pytest.raises(ModelProtocolError, match='planning pass must return a reply or a plan'):
+        await loop.run_turn('go')
+
+
+async def test_discovery_selection_from_intent_pass_when_discovery_off_is_protocol_error() -> None:
+    # Discovery off: the single intent pass must yield reply or plan. A
+    # stray DiscoverySelection (model ignoring the prompt) is rejected
+    # rather than silently falling through to the executor as a non-plan.
+    loop, _, _, executor = _wire(DiscoverySelection(plugins=('a',)))
+
+    with pytest.raises(ModelProtocolError, match='intent pass must return a reply or a plan'):
+        await loop.run_turn('go')
 
     assert executor.plans_seen == []
 

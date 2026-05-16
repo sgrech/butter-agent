@@ -1,6 +1,9 @@
 # Capability discovery — progressive disclosure of the plugin menu
 
-Status: proposed
+Status: implemented (issue #30) — behind `[core] capability_discovery`,
+default off; `KeywordCapabilityFilter` retained as the off/fallback path.
+Open question follow-ups (skip-threshold token measurement; model-authored
+vs neutral Tier-1 purpose) deferred — see task #390 / issue #30.
 Owner: shanegrech
 Created: 2026-05-15
 Follows from: live-REPL testing on 2026-05-15 (filesystem plugin,
