@@ -527,7 +527,7 @@ output_schema = {}
 
     assert context.payload['plugin_index'] == (
         PluginIndexEntry(name='weather', summary='Live forecasts and current conditions.'),
-        PluginIndexEntry(name='notes', summary='1 capabilities: create'),
+        PluginIndexEntry(name='notes', summary='1 capability: create'),
     )
 
 
@@ -567,7 +567,7 @@ internal = true
 
     assert context.payload['plugin_index'] == (
         PluginIndexEntry(name='notes', summary='2 capabilities: create, list'),
-        PluginIndexEntry(name='search', summary='1 capabilities: web'),
+        PluginIndexEntry(name='search', summary='1 capability: web'),
     )
 
 

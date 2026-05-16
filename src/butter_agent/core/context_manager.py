@@ -380,6 +380,7 @@ def _plugin_index(registry: PluginRegistry) -> tuple[PluginIndexEntry, ...]:
         else:
             shown = ', '.join(public[:_INDEX_FALLBACK_CAP_NAMES])
             elided = '' if len(public) <= _INDEX_FALLBACK_CAP_NAMES else ', …'
-            summary = f'{len(public)} capabilities: {shown}{elided}'
+            noun = 'capability' if len(public) == 1 else 'capabilities'
+            summary = f'{len(public)} {noun}: {shown}{elided}'
         entries.append(PluginIndexEntry(name=name, summary=summary))
     return tuple(entries)
